@@ -122,7 +122,7 @@ func TestSearchModes(t *testing.T) {
 
 	require.NoError(t, db.Exec(`
 		CREATE TABLE authors (id TEXT PRIMARY KEY, name TEXT);
-		CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT, type TEXT);
+		CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT, team_name TEXT, type TEXT);
 		CREATE TABLE messages (
 			id INTEGER PRIMARY KEY,
 			thread_id INTEGER,
@@ -134,7 +134,7 @@ func TestSearchModes(t *testing.T) {
 			timestamp TIMESTAMP
 		);
 		INSERT INTO authors VALUES ('8:orgid:00000000-0000-0000-0000-000000000001', 'Alice');
-		INSERT INTO channels VALUES ('c1', 'General', 'channel'), ('c2', 'Operations', 'channel');
+		INSERT INTO channels VALUES ('c1', 'General', 'ICTS', 'channel'), ('c2', 'Operations', '', 'channel');
 		INSERT INTO messages (id, channel_id, direction, author_id, content) VALUES
 			(1700000000000, 'c1', 'received', '8:orgid:00000000-0000-0000-0000-000000000001', 'first message'),
 			(1700000010000, 'c1', 'received', '8:orgid:00000000-0000-0000-0000-000000000001', 'needle in general'),
@@ -159,7 +159,7 @@ func TestSearchModes(t *testing.T) {
 	m.globalQuery = "needle"
 	m.refresh()
 	require.Len(t, m.channels, 1)
-	require.Equal(t, "General", m.channels[0].Name)
+	require.Equal(t, "ICTS › General", m.channels[0].Name)
 	require.Len(t, m.messages, 1)
 	require.Equal(t, "needle in general", m.messages[0].Content)
 	m.handleKey("esc")
@@ -191,7 +191,7 @@ func TestModelNavigationAndScroll(t *testing.T) {
 
 	require.NoError(t, db.Exec(`
 		CREATE TABLE authors (id TEXT PRIMARY KEY, name TEXT);
-		CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT, type TEXT);
+		CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT, team_name TEXT, type TEXT);
 		CREATE TABLE messages (
 			id INTEGER PRIMARY KEY,
 			thread_id INTEGER,
@@ -203,7 +203,7 @@ func TestModelNavigationAndScroll(t *testing.T) {
 			timestamp TIMESTAMP
 		);
 		INSERT INTO authors VALUES ('8:orgid:00000000-0000-0000-0000-000000000001', 'Alice');
-		INSERT INTO channels VALUES ('c1', 'General', 'channel'), ('c2', 'Random', 'group chat');
+		INSERT INTO channels VALUES ('c1', 'General', 'ICTS', 'channel'), ('c2', 'Random', NULL, 'group chat');
 		INSERT INTO messages (id, channel_id, direction, author_id, content, reactions) VALUES
 			(1700000000000, 'c1', 'received', '8:orgid:00000000-0000-0000-0000-000000000001', 'hello irc', '👍 1');
 	`).Error)

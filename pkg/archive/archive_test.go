@@ -21,7 +21,7 @@ func seedTestDB(t *testing.T) string {
 
 	require.NoError(t, db.Exec(`
 		CREATE TABLE authors (id TEXT PRIMARY KEY, name TEXT);
-		CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT, type TEXT);
+		CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT, team_name TEXT, type TEXT);
 		CREATE TABLE message_mentions (
 			message_id INTEGER,
 			author_id TEXT,
@@ -39,7 +39,9 @@ func seedTestDB(t *testing.T) string {
 			recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		);
 		INSERT INTO authors VALUES ('8:orgid:1', 'Alice'), ('8:orgid:2', 'Bob');
-		INSERT INTO channels VALUES ('19:chan1@thread.tacv2', 'General', 'channel');
+		INSERT INTO channels VALUES
+			('19:chan1@thread.tacv2', 'General', 'ICTS', 'channel'),
+			('19:chat1@thread.v2', 'Standup', '', 'meeting chat');
 		INSERT INTO messages (id, channel_id, direction, author_id, content, reactions) VALUES
 			(1700000000000, '19:chan1@thread.tacv2', 'received', '8:orgid:1', 'hello world Bob', '👍 1'),
 			(1700000060000, '19:chan1@thread.tacv2', 'sent', '8:orgid:2', 'reply here', NULL);
@@ -57,9 +59,10 @@ func TestStoreQueries(t *testing.T) {
 
 	channels, err := store.Channels(ctx)
 	require.NoError(t, err)
-	require.Len(t, channels, 1)
-	require.Equal(t, "General", channels[0].Name)
+	require.Len(t, channels, 2)
+	require.Equal(t, "ICTS › General", channels[0].Name)
 	require.Equal(t, int64(2), channels[0].Messages)
+	require.Equal(t, "Standup", channels[1].Name)
 
 	authors, err := store.Authors(ctx)
 	require.NoError(t, err)

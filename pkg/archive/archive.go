@@ -22,6 +22,8 @@ import (
 const (
 	formatJSON  = "json"
 	formatTable = "table"
+
+	channelNameExpr = "CASE WHEN COALESCE(c.team_name, '') != '' THEN c.team_name || ' › ' || COALESCE(c.name, c.id) ELSE COALESCE(c.name, c.id) END"
 )
 
 type Store struct {
@@ -116,7 +118,7 @@ func (s *Store) ChannelsFiltered(ctx context.Context, nameQuery, messageQuery st
 
 	q := s.db.WithContext(ctx).
 		Table("channels c").
-		Select("c.id, COALESCE(c.name, c.id) AS name, COALESCE(c.type, '') AS type, COUNT(m.id) AS messages")
+		Select("c.id, " + channelNameExpr + " AS name, COALESCE(c.type, '') AS type, COUNT(m.id) AS messages")
 
 	if messageQuery != "" {
 		q = q.Joins("JOIN messages m ON m.channel_id = c.id AND m.content LIKE ?", "%"+messageQuery+"%")
@@ -126,7 +128,7 @@ func (s *Store) ChannelsFiltered(ctx context.Context, nameQuery, messageQuery st
 
 	if nameQuery != "" {
 		like := "%" + nameQuery + "%"
-		q = q.Where("c.name LIKE ? OR c.id LIKE ?", like, like)
+		q = q.Where(channelNameExpr+" LIKE ? OR c.id LIKE ?", like, like)
 	}
 
 	err := q.Group("c.id").Order("MAX(m.id) DESC, name ASC").Scan(&out).Error
@@ -185,7 +187,7 @@ func (s *Store) topChannels(ctx context.Context, f StatsFilter) ([]Channel, erro
 		Table("channels c").
 		Select(`
 			c.id,
-			COALESCE(c.name, c.id) AS name,
+			` + channelNameExpr + ` AS name,
 			COALESCE(c.type, '') AS type,
 			COUNT(m.id) AS messages,
 			COALESCE(SUM(CASE WHEN m.direction = 'sent' THEN 1 ELSE 0 END), 0) AS sent
@@ -211,7 +213,7 @@ func (s *Store) topChannels(ctx context.Context, f StatsFilter) ([]Channel, erro
 func (f StatsFilter) applyChannelFilters(q *gorm.DB) *gorm.DB {
 	if f.Channel != "" {
 		like := "%" + f.Channel + "%"
-		q = q.Where("c.name LIKE ? OR c.id LIKE ?", like, like)
+		q = q.Where(channelNameExpr+" LIKE ? OR c.id LIKE ?", like, like)
 	}
 
 	if len(f.Types) > 0 {
@@ -233,7 +235,7 @@ func (s *Store) Messages(ctx context.Context, f Filter) ([]Message, error) {
 		Select(`
 			m.id, m.thread_id,
 			COALESCE(m.channel_id, '') AS channel_id,
-			COALESCE(c.name, m.channel_id, '') AS channel_name,
+			CASE WHEN COALESCE(c.team_name, '') != '' THEN c.team_name || ' › ' || COALESCE(c.name, m.channel_id, '') ELSE COALESCE(c.name, m.channel_id, '') END AS channel_name,
 			COALESCE(c.type, '') AS channel_type,
 			COALESCE(m.direction, '') AS direction,
 			COALESCE(m.author_id, '') AS author_id,
@@ -306,7 +308,7 @@ func (f Filter) apply(q *gorm.DB) *gorm.DB {
 
 	if f.Channel != "" {
 		like := "%" + f.Channel + "%"
-		q = q.Where("c.name LIKE ? OR m.channel_id LIKE ?", like, like)
+		q = q.Where(channelNameExpr+" LIKE ? OR m.channel_id LIKE ?", like, like)
 	}
 
 	if f.Author != "" {
