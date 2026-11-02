@@ -62,28 +62,57 @@ func TestCodeBlockFormatting(t *testing.T) {
 	require.Contains(t, lines[2], "[bash]")
 	require.Contains(t, lines[3], "▎ ")
 	require.Contains(t, lines[3], "echo hello")
+}
 
+func TestThreadAndMentionFormatting(t *testing.T) {
 	tid := int64(1700000000000)
 	rootLines := formatIRCMessage(archive.Message{ //nolint:exhaustruct_v5
-		ID:         tid,
-		ThreadID:   &tid,
-		Direction:  testDirection,
-		AuthorID:   testAuthorID,
-		AuthorName: testAuthorName,
-		Content:    "thread root",
+		ID: tid, ThreadID: &tid, Direction: testDirection, AuthorID: testAuthorID, AuthorName: testAuthorName,
+		Content:  "thread root line 1\nthread root line 2 with Bob  Smith",
+		Mentions: []archive.Mention{{ID: "8:orgid:2", Name: "Bob Smith"}},
 	}, 60)
-	require.Contains(t, rootLines[0], "┬ ")
+	require.Equal(t, []string{"┌ ", "│ ", "│ "}, []string{rootLines[0][:4], rootLines[1][:4], rootLines[2][:4]})
+	require.Contains(t, rootLines[2], "@Bob Smith")
 
 	replyLines := formatIRCMessage(archive.Message{ //nolint:exhaustruct_v5
-		ID:         tid + 1000,
-		ThreadID:   &tid,
-		Direction:  testDirection,
-		AuthorID:   testAuthorID,
-		AuthorName: testAuthorName,
-		Content:    "thread reply",
+		ID: tid + 1000, ThreadID: &tid, Direction: testDirection, AuthorID: testAuthorID, AuthorName: testAuthorName,
+		Content: "thread reply line 1\nthread reply line 2",
 	}, 60)
-	require.NotContains(t, replyLines[0], "┬ ")
-	require.Contains(t, replyLines[0], "│ ")
+	require.Equal(t, []string{"├ ", "│ ", "│ "}, []string{replyLines[0][:4], replyLines[1][:4], replyLines[2][:4]})
+
+	endLines := formatIRCMessage(archive.Message{ //nolint:exhaustruct_v5
+		ID: tid + 2000, ThreadID: &tid, Direction: testDirection, AuthorID: testAuthorID, AuthorName: testAuthorName,
+		Content: "last thread reply line 1\nlast thread reply line 2",
+	}, 60, threadEnd)
+	require.Equal(t, []string{"├ ", "│ ", "└ "}, []string{endLines[0][:4], endLines[1][:4], endLines[2][:4]})
+
+	endSingleLine := formatIRCMessage(archive.Message{ //nolint:exhaustruct_v5
+		ID: tid + 2500, ThreadID: &tid, Direction: testDirection, AuthorID: testAuthorID, AuthorName: testAuthorName,
+		Content: "short last reply",
+	}, 60, threadEnd)
+	require.Equal(t, "└ ", endSingleLine[0][:4])
+
+	singleLines := formatIRCMessage(archive.Message{ //nolint:exhaustruct_v5
+		ID: tid + 3000, ThreadID: &tid, Direction: testDirection, AuthorID: testAuthorID, AuthorName: testAuthorName,
+		Content: "standalone thread message",
+	}, 60, threadSingle)
+	require.Equal(t, "• ", singleLines[0][:len("• ")])
+
+	singleMultiLines := formatIRCMessage(archive.Message{ //nolint:exhaustruct_v5
+		ID: tid + 4000, ThreadID: &tid, Direction: testDirection, AuthorID: testAuthorID, AuthorName: testAuthorName,
+		Content: "standalone line 1\nstandalone line 2",
+	}, 60, threadSingle)
+	require.Equal(t, []string{"┌ ", "│ ", "└ "}, []string{singleMultiLines[0][:4], singleMultiLines[1][:4], singleMultiLines[2][:4]})
+
+	tid2 := tid + 5000
+	roles := computeThreadRoles([]archive.Message{
+		{ID: tid, ThreadID: &tid},     //nolint:exhaustruct_v5
+		{ID: tid + 1, ThreadID: &tid}, //nolint:exhaustruct_v5
+		{ID: tid + 2, ThreadID: &tid}, //nolint:exhaustruct_v5
+		{ID: tid2, ThreadID: &tid2},   //nolint:exhaustruct_v5
+		{ID: tid2 + 1, ThreadID: nil}, //nolint:exhaustruct_v5
+	})
+	require.Equal(t, []threadRole{threadStart, threadMiddle, threadEnd, threadSingle, threadNone}, roles)
 }
 
 func TestSearchModes(t *testing.T) {
@@ -209,4 +238,16 @@ func TestModelNavigationAndScroll(t *testing.T) {
 	m.handleKey("down")
 	require.Equal(t, 0, m.scrollOffset)
 	require.Contains(t, m.View(), "hello irc")
+
+	// Start a background refresh while on c1 (index 1), then switch back up to c2 (index 0)
+	// before the refresh completes; the stale refreshMsg must not revert the selection.
+	staleCmd := m.refreshCmd()
+	m.handleKey("up")
+	require.Equal(t, 0, m.selected)
+	require.Equal(t, "c2", m.channelID)
+
+	_, _ = m.Update(staleCmd())
+	require.Equal(t, 0, m.selected)
+	require.Equal(t, "c2", m.channelID)
+	require.Contains(t, m.View(), "msg-19")
 }

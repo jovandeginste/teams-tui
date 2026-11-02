@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"cmp"
 	"context"
 	"crypto/md5" //nolint:gosec
 	"fmt"
@@ -19,6 +20,7 @@ const (
 	sidebarWidth        = 30
 	defaultMessageLimit = 200
 	refreshEvery        = time.Second
+	errorDisplayTTL     = 2 * time.Second
 	wheelScrollStep     = 3
 
 	modeNone      = ""
@@ -27,7 +29,28 @@ const (
 	modeGlobal    = "global"
 )
 
-type tickMsg time.Time
+type threadRole int
+
+const (
+	threadNone threadRole = iota
+	threadSingle
+	threadStart
+	threadMiddle
+	threadEnd
+)
+
+type (
+	tickMsg     time.Time
+	clearErrMsg struct{}
+	refreshMsg  struct {
+		seq       uint64
+		channels  []archive.Channel
+		messages  []archive.Message
+		selected  int
+		channelID string
+		err       error
+	}
+)
 
 type Model struct {
 	store         *archive.Store
@@ -35,6 +58,7 @@ type Model struct {
 	messages      []archive.Message
 	selected      int
 	channelID     string
+	refreshSeq    uint64
 	focusMessages bool
 	showHelp      bool
 	scrollOffset  int // lines from bottom (0 = follow latest)
@@ -91,9 +115,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 	case tickMsg:
-		m.refresh()
+		return m, tea.Batch(m.refreshCmd(), tickCmd())
+	case refreshMsg:
+		return m, m.applyRefresh(msg)
+	case clearErrMsg:
+		m.err = nil
 
-		return m, tickCmd()
+		return m, nil
 	case tea.MouseMsg:
 		m.handleMouse(msg)
 
@@ -385,58 +413,150 @@ func (m *Model) channelStartIndex() int {
 func (m *Model) renderedLines() []string {
 	width := m.messageBodyWidth()
 	lines := make([]string, 0, len(m.messages))
+	roles := computeThreadRoles(m.messages)
 
-	for _, msg := range m.messages {
-		lines = append(lines, formatIRCMessage(msg, width)...)
+	for i, msg := range m.messages {
+		lines = append(lines, formatIRCMessage(msg, width, roles[i])...)
 	}
 
 	return lines
 }
 
-func (m *Model) refresh() {
-	ctx := context.Background()
+func computeThreadRoles(messages []archive.Message) []threadRole {
+	roles := make([]threadRole, len(messages))
+	firstIdx := make(map[int64]int)
+	lastIdx := make(map[int64]int)
+	counts := make(map[int64]int)
 
-	channels, err := m.store.ChannelsFiltered(ctx, m.channelQuery, m.globalQuery)
-	if err != nil {
-		m.err = err
-		return
+	for i, msg := range messages {
+		if msg.ThreadID == nil || *msg.ThreadID <= 0 {
+			continue
+		}
+
+		tid := *msg.ThreadID
+		if counts[tid] == 0 {
+			firstIdx[tid] = i
+		}
+
+		lastIdx[tid] = i
+		counts[tid]++
 	}
 
-	m.err = nil
-	m.channels = channels
+	for i, msg := range messages {
+		if msg.ThreadID == nil || *msg.ThreadID <= 0 {
+			continue
+		}
 
-	if len(channels) == 0 {
-		m.selected = 0
-		m.channelID = ""
-		m.messages = nil
-
-		return
-	}
-
-	found := false
-
-	if m.channelID != "" {
-		for i, ch := range channels {
-			if ch.ID == m.channelID {
-				m.selected = i
-				found = true
-
-				break
-			}
+		tid := *msg.ThreadID
+		switch {
+		case counts[tid] == 1:
+			roles[i] = threadSingle
+		case i == firstIdx[tid]:
+			roles[i] = threadStart
+		case i == lastIdx[tid]:
+			roles[i] = threadEnd
+		default:
+			roles[i] = threadMiddle
 		}
 	}
 
-	if !found {
-		m.selected = 0
-	} else if m.selected >= len(channels) {
-		m.selected = len(channels) - 1
+	return roles
+}
+
+func (m *Model) refreshCmd() tea.Cmd {
+	m.refreshSeq++
+	seq := m.refreshSeq
+	store := m.store
+	channelQuery := m.channelQuery
+	globalQuery := m.globalQuery
+	msgFilter := m.activeMessageFilter()
+	limit := max(m.messageLimit, defaultMessageLimit)
+	curChannelID := m.channelID
+	curSelected := m.selected
+
+	return func() tea.Msg {
+		ctx := context.Background()
+
+		channels, err := store.ChannelsFiltered(ctx, channelQuery, globalQuery)
+		if err != nil {
+			return refreshMsg{seq: seq, err: err} //nolint:exhaustruct_v5
+		}
+
+		if len(channels) == 0 {
+			return refreshMsg{seq: seq, channels: channels} //nolint:exhaustruct_v5
+		}
+
+		selected, channelID := resolveSelection(channels, curChannelID, curSelected)
+
+		msgs, err := store.Messages(ctx, archive.Filter{ //nolint:exhaustruct_v5
+			ChannelID: channelID,
+			Query:     msgFilter,
+			Limit:     limit,
+		})
+		if err != nil {
+			return refreshMsg{seq: seq, err: err} //nolint:exhaustruct_v5
+		}
+
+		return refreshMsg{
+			seq:       seq,
+			channels:  channels,
+			messages:  msgs,
+			selected:  selected,
+			channelID: channelID,
+			err:       nil,
+		}
+	}
+}
+
+func (m *Model) applyRefresh(msg refreshMsg) tea.Cmd {
+	if msg.seq != m.refreshSeq {
+		return nil
 	}
 
-	m.channelID = channels[m.selected].ID
-	m.loadMessages()
+	if msg.err != nil {
+		m.err = msg.err
+
+		return tea.Tick(errorDisplayTTL, func(time.Time) tea.Msg {
+			return clearErrMsg{}
+		})
+	}
+
+	m.err = nil
+	m.channels = msg.channels
+	m.messages = msg.messages
+	m.selected = msg.selected
+	m.channelID = msg.channelID
+
+	return nil
+}
+
+func resolveSelection(channels []archive.Channel, channelID string, selected int) (int, string) {
+	if channelID != "" {
+		for i, ch := range channels {
+			if ch.ID == channelID {
+				return i, ch.ID
+			}
+		}
+
+		return 0, channels[0].ID
+	}
+
+	if selected < 0 || selected >= len(channels) {
+		selected = 0
+	}
+
+	return selected, channels[selected].ID
+}
+
+func (m *Model) refresh() {
+	if msg, ok := m.refreshCmd()().(refreshMsg); ok {
+		_ = m.applyRefresh(msg)
+	}
 }
 
 func (m *Model) loadMessages() {
+	m.refreshSeq++
+
 	if m.channelID == "" {
 		m.messages = nil
 		return
@@ -512,6 +632,9 @@ func (m *Model) renderHelpBox() string {
 		"  ?               Toggle this help popup",
 		"  q, ctrl+c       Quit",
 		"",
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffb86c")).Render("Channel Symbols"),
+		"  # channel   & group chat   * meeting chat   @ direct chat",
+		"",
 		lipgloss.NewStyle().Foreground(lipgloss.Color("#6272a4")).Italic(true).Render("Press any key to close"),
 	}, "\n")
 
@@ -583,11 +706,14 @@ func (m *Model) renderChannels(width, height int) string {
 		normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f8f8f2"))
 
 		for i := start; i < end; i++ {
-			name := truncate(strings.ReplaceAll(m.channels[i].Name, "\n", " "), max(width-2, 4))
+			ch := m.channels[i]
+			sym := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ChannelColor(ch.ID))).Render(channelSymbol(ch.Type))
+			name := truncate(strings.ReplaceAll(ch.Name, "\n", " "), max(width-4, 4))
+
 			if i == m.selected {
-				lines = append(lines, activeStyle.Render("> "+name))
+				lines = append(lines, activeStyle.Render(">")+" "+sym+" "+activeStyle.Render(name))
 			} else {
-				lines = append(lines, normalStyle.Render("  "+name))
+				lines = append(lines, "  "+sym+" "+normalStyle.Render(name))
 			}
 		}
 	}
@@ -602,14 +728,10 @@ func (m *Model) renderChannels(width, height int) string {
 }
 
 func (m *Model) renderMessages(width, height int) string {
-	if m.err != nil {
-		return fmt.Sprintf("Error: %v", m.err)
-	}
-
 	title := "Messages"
 	if m.selected >= 0 && m.selected < len(m.channels) {
 		ch := m.channels[m.selected]
-		title = fmt.Sprintf("# %s (%s)", ch.Name, ch.Type)
+		title = fmt.Sprintf("%s %s (%s)", channelSymbol(ch.Type), ch.Name, ch.Type)
 	}
 
 	if m.scrollOffset > 0 {
@@ -618,6 +740,10 @@ func (m *Model) renderMessages(width, height int) string {
 
 	if q := m.activeMessageFilter(); q != "" {
 		title = fmt.Sprintf("%s [search: %q]", title, q)
+	}
+
+	if m.err != nil {
+		title = fmt.Sprintf("%s [sync err: %v]", title, m.err)
 	}
 
 	headerColor := "#ffb86c"
@@ -640,6 +766,19 @@ func (m *Model) renderMessages(width, height int) string {
 	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("#44475a")).Render(strings.Repeat("─", max(width, 1)))
 
 	return header + "\n" + sep + "\n" + strings.Join(withBar, "\n")
+}
+
+func channelSymbol(channelType string) string {
+	switch channelType {
+	case "channel":
+		return "#"
+	case "group chat":
+		return "&"
+	case "meeting chat":
+		return "*"
+	default:
+		return "@"
+	}
 }
 
 func attachScrollbar(lines []string, total, start, height, contentWidth int) []string {
@@ -682,8 +821,15 @@ func sanitizeText(s string) string {
 	return strings.TrimSpace(s)
 }
 
-func formatIRCMessage(msg archive.Message, width int) []string {
-	ts, prefixWidth := renderTimestamp(msg)
+func formatIRCMessage(msg archive.Message, width int, roles ...threadRole) []string {
+	const indent = "    "
+
+	role := defaultThreadRole(msg)
+	if len(roles) > 0 {
+		role = roles[0]
+	}
+
+	ts, prefixWidth, contWidth := renderPrefix(msg, width, role)
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6272a4")).Italic(true)
 
 	content := sanitizeText(msg.Content)
@@ -691,12 +837,10 @@ func formatIRCMessage(msg archive.Message, width int) []string {
 		content += " [" + sanitizeText(msg.Reactions) + "]"
 	}
 
-	const indent = "    "
-
-	contWidth := max(width-len(indent), 10)
-
 	if msg.Direction == "event" || (msg.AuthorID == "" && msg.AuthorName == "") {
-		return formatEventLines(ts, prefixWidth, content, dimStyle, width, indent)
+		lines := formatEventLines(ts, indent, max(width-prefixWidth, 10), contWidth, content, dimStyle)
+
+		return applyThreadGutter(lines, msg, role)
 	}
 
 	nick := sanitizeText(msg.AuthorName)
@@ -709,12 +853,13 @@ func formatIRCMessage(msg archive.Message, width int) []string {
 	nickRendered := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true).Render(nickPlain)
 
 	if !strings.Contains(content, "\n") {
+		content = normalizeMentions(content, msg.Mentions)
 		firstWidth := max(width-(prefixWidth+cellWidth(nickPlain)+1), 10)
 		chunks := wrapFirstThenRest(content, firstWidth, contWidth)
 		out := make([]string, 0, len(chunks))
 
 		for i, chunk := range chunks {
-			styled := styleInlineCode(chunk)
+			styled := styleInlineText(chunk, msg.Mentions)
 			if i == 0 {
 				out = append(out, fmt.Sprintf("%s%s %s", ts, nickRendered, styled))
 			} else {
@@ -722,53 +867,99 @@ func formatIRCMessage(msg archive.Message, width int) []string {
 			}
 		}
 
-		return out
+		return applyThreadGutter(out, msg, role)
 	}
 
 	rawLines := strings.Split(content, "\n")
 	out := make([]string, 0, len(rawLines)+1)
 	out = append(out, fmt.Sprintf("%s%s", ts, nickRendered))
 
-	for _, line := range formatMultilineBody(rawLines, contWidth) {
+	for _, line := range formatMultilineBody(rawLines, contWidth, msg.Mentions) {
 		out = append(out, indent+line)
 	}
 
-	return out
+	return applyThreadGutter(out, msg, role)
 }
 
-func renderTimestamp(msg archive.Message) (string, int) {
+func defaultThreadRole(msg archive.Message) threadRole {
+	if msg.ThreadID == nil || *msg.ThreadID <= 0 {
+		return threadNone
+	}
+
+	if *msg.ThreadID == msg.ID {
+		return threadStart
+	}
+
+	return threadMiddle
+}
+
+func renderPrefix(msg archive.Message, width int, role threadRole) (string, int, int) {
+	const indent = "    "
+
 	tsPlain := msg.Timestamp.Format("2006-01-02 15:04")
 	tsStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6272a4"))
-	threadCue := ""
 	cueWidth := 0
 
-	if msg.ThreadID != nil && *msg.ThreadID > 0 {
-		tColor := lipgloss.Color(ThreadColor(*msg.ThreadID))
-		tsStyle = lipgloss.NewStyle().Foreground(tColor)
-		cueStyle := lipgloss.NewStyle().Foreground(tColor).Bold(true)
+	if role != threadNone && msg.ThreadID != nil && *msg.ThreadID > 0 {
+		tsStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(ThreadColor(*msg.ThreadID)))
 		cueWidth = 2
 
-		if *msg.ThreadID == msg.ID {
+		if role == threadSingle || role == threadStart {
 			tsStyle = tsStyle.Bold(true).Underline(true)
-			threadCue = cueStyle.Render("┬ ")
-		} else {
-			threadCue = cueStyle.Render("│ ")
 		}
 	}
 
-	return tsStyle.Render(tsPlain) + " " + threadCue, len(tsPlain) + 1 + cueWidth
+	prefixWidth := cueWidth + len(tsPlain) + 1
+	contWidth := max(width-len(indent)-cueWidth, 10)
+
+	return tsStyle.Render(tsPlain) + " ", prefixWidth, contWidth
 }
 
-func formatEventLines(ts string, prefixWidth int, content string, dimStyle lipgloss.Style, width int, indent string) []string {
+func applyThreadGutter(lines []string, msg archive.Message, role threadRole) []string {
+	if role == threadNone || msg.ThreadID == nil || *msg.ThreadID <= 0 {
+		return lines
+	}
+
+	cueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ThreadColor(*msg.ThreadID))).Bold(true)
+	pipe := cueStyle.Render("│ ")
+	cornerTop := cueStyle.Render("┌ ")
+	cornerBottom := cueStyle.Render("└ ")
+	teeRight := cueStyle.Render("├ ")
+	bullet := cueStyle.Render("• ")
+
+	isFirstMsg := role == threadSingle || role == threadStart
+	isLastMsg := role == threadSingle || role == threadEnd
+
+	for i := range lines {
+		cue := pipe
+
+		switch {
+		case isFirstMsg && isLastMsg && len(lines) == 1:
+			cue = bullet
+		case isFirstMsg && i == 0:
+			cue = cornerTop
+		case isLastMsg && i == len(lines)-1:
+			cue = cornerBottom
+		case i == 0:
+			cue = teeRight
+		}
+
+		lines[i] = cue + lines[i]
+	}
+
+	return lines
+}
+
+func formatEventLines(ts, contPrefix string, firstWidth, contWidth int, content string, dimStyle lipgloss.Style) []string {
 	flat := "* " + strings.Join(strings.Fields(content), " ")
-	wrapped := wrapFirstThenRest(flat, max(width-prefixWidth, 10), max(width-len(indent), 10))
+	wrapped := wrapFirstThenRest(flat, firstWidth, contWidth)
 	out := make([]string, 0, len(wrapped))
 
 	for i, line := range wrapped {
 		if i == 0 {
 			out = append(out, fmt.Sprintf("%s%s", ts, dimStyle.Render(line)))
 		} else {
-			out = append(out, indent+dimStyle.Render(line))
+			out = append(out, contPrefix+dimStyle.Render(line))
 		}
 	}
 
@@ -801,7 +992,7 @@ func wrapFirstThenRest(s string, firstWidth, restWidth int) []string {
 	return out
 }
 
-func formatMultilineBody(rawLines []string, width int) []string {
+func formatMultilineBody(rawLines []string, width int, mentions []archive.Mention) []string {
 	var (
 		out         []string
 		inCodeBlock bool
@@ -832,18 +1023,18 @@ func formatMultilineBody(rawLines []string, width int) []string {
 			continue
 		}
 
-		out = append(out, formatBodyLine(line, width)...)
+		out = append(out, formatBodyLine(line, width, mentions)...)
 	}
 
 	return out
 }
 
-func formatBodyLine(line string, width int) []string {
+func formatBodyLine(line string, width int, mentions []archive.Mention) []string {
 	trimmed := strings.TrimLeft(line, " ")
 	if !strings.HasPrefix(trimmed, ">") {
-		parts := wrapLine(line, width)
+		parts := wrapLine(normalizeMentions(line, mentions), width)
 		for i, part := range parts {
-			parts[i] = styleInlineCode(part)
+			parts[i] = styleInlineText(part, mentions)
 		}
 
 		return parts
@@ -867,16 +1058,37 @@ func formatBodyLine(line string, width int) []string {
 	return out
 }
 
-func styleInlineCode(s string) string {
+func normalizeMentions(s string, mentions []archive.Mention) string {
+	for _, m := range mentions {
+		words := strings.Fields(sanitizeText(m.Name))
+		for i := range len(words) - 1 {
+			s = strings.ReplaceAll(s, words[i]+"  "+words[i+1], words[i]+" "+words[i+1])
+		}
+
+		for _, cand := range mentionCandidates(m) {
+			if idx := findMentionIndex(s, cand); idx >= 0 {
+				if idx == 0 || s[idx-1] != '@' {
+					s = s[:idx] + "@" + s[idx:]
+				}
+
+				break
+			}
+		}
+	}
+
+	return s
+}
+
+func styleInlineText(s string, mentions []archive.Mention) string {
 	if !strings.Contains(s, "`") {
-		return s
+		return styleMentions(s, mentions)
 	}
 
 	codeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f1fa8c"))
 	parts := strings.Split(s, "`")
 
 	if len(parts) < 3 {
-		return s
+		return styleMentions(s, mentions)
 	}
 
 	var b strings.Builder
@@ -885,11 +1097,96 @@ func styleInlineCode(s string) string {
 		if i%2 == 1 {
 			b.WriteString(codeStyle.Render("`" + part + "`"))
 		} else {
-			b.WriteString(part)
+			b.WriteString(styleMentions(part, mentions))
 		}
 	}
 
 	return b.String()
+}
+
+func styleMentions(s string, mentions []archive.Mention) string {
+	for _, m := range mentions {
+		color := AuthorColor(cmp.Or(m.ID, m.Name))
+		for _, cand := range mentionCandidates(m) {
+			if updated, ok := replaceMentionToken(s, cand, color); ok {
+				s = updated
+				break
+			}
+		}
+	}
+
+	return s
+}
+
+func mentionCandidates(m archive.Mention) []string {
+	name := sanitizeText(m.Name)
+	if name == "" {
+		return nil
+	}
+
+	out := []string{name}
+	if strings.EqualFold(name, "Iedereen") {
+		out = append(out, "Everyone")
+	}
+
+	if words := strings.Fields(name); len(words) > 1 && len(words[0]) >= 2 {
+		out = append(out, words[0])
+	}
+
+	return out
+}
+
+func replaceMentionToken(s, token, color string) (string, bool) {
+	idx := findMentionIndex(s, token)
+	if idx < 0 {
+		return s, false
+	}
+
+	start := idx
+	if start > 0 && s[start-1] == '@' {
+		start--
+	}
+
+	end := idx + len(token)
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true).Underline(true)
+
+	return s[:start] + style.Render(s[start:end]) + s[end:], true
+}
+
+func findMentionIndex(s, token string) int {
+	offset := 0
+
+	for offset < len(s) {
+		rel := strings.Index(s[offset:], token)
+		if rel < 0 {
+			return -1
+		}
+
+		idx := offset + rel
+		if hasWordBoundary(s, idx, idx+len(token)) {
+			return idx
+		}
+
+		offset = idx + len(token)
+	}
+
+	return -1
+}
+
+func hasWordBoundary(s string, start, end int) bool {
+	if start > 0 && isWordByte(s[start-1]) {
+		return false
+	}
+
+	if end < len(s) && isWordByte(s[end]) {
+		return false
+	}
+
+	return true
+}
+
+func isWordByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
 
 func hashColor(value string) string {
@@ -906,6 +1203,11 @@ func ThreadColor(threadID int64) string {
 // AuthorColor derives a hex color from the first 6 characters of the MD5 sum of the author ID.
 func AuthorColor(authorID string) string {
 	return hashColor(strings.TrimSpace(authorID))
+}
+
+// ChannelColor derives a hex color from the first 6 characters of the MD5 sum of the channel ID.
+func ChannelColor(channelID string) string {
+	return hashColor(strings.TrimSpace(channelID))
 }
 
 func cellWidth(s string) int {

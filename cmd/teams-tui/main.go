@@ -36,13 +36,47 @@ func main() {
 
 	rootCmd.PersistentFlags().StringVarP(&dbPath, "db", "d", dbPath, "path to teams.db")
 	rootCmd.PersistentFlags().StringVarP(&channel, "channel", "c", "", "filter by channel name")
-	rootCmd.AddCommand(newMessagesCmd(&dbPath, &channel))
+	rootCmd.AddCommand(newMessagesCmd(&dbPath, &channel), newStatsCmd(&dbPath, &channel))
 	rootCmd.InitDefaultCompletionCmd()
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func newStatsCmd(dbPath, channel *string) *cobra.Command {
+	var (
+		filter archive.StatsFilter
+		format string
+	)
+
+	cmd := &cobra.Command{ //nolint:exhaustruct_v5
+		Use:   "stats",
+		Short: "Show top channels by total messages or messages sent by you",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			filter.Channel = *channel
+
+			store, err := archive.Open(*dbPath)
+			if err != nil {
+				return err
+			}
+
+			stats, err := store.Stats(cmd.Context(), filter)
+			if err != nil {
+				return err
+			}
+
+			return archive.WriteStats(os.Stdout, stats, format)
+		},
+	}
+
+	cmd.Flags().IntVarP(&filter.Limit, "limit", "n", 20, "number of top channels to show")
+	cmd.Flags().StringSliceVarP(&filter.Types, "type", "t", nil, "filter by channel type (channel, group, meeting, direct; repeatable)")
+	cmd.Flags().BoolVarP(&filter.BySent, "sent", "s", false, "rank channels by messages sent by you instead of total messages")
+	cmd.Flags().StringVarP(&format, "format", "o", "table", "output format: table or json")
+
+	return cmd
 }
 
 func newMessagesCmd(dbPath, channel *string) *cobra.Command {

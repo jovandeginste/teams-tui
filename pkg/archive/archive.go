@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/url"
 	"os"
 	"slices"
@@ -34,12 +33,31 @@ type Channel struct {
 	Name     string `json:"name" gorm:"column:name"`
 	Type     string `json:"type" gorm:"column:type"`
 	Messages int64  `json:"messages" gorm:"column:messages"`
+	Sent     int64  `json:"sent,omitempty" gorm:"column:sent"`
+}
+
+type Stats struct {
+	TotalMessages int64     `json:"total_messages"`
+	TotalSent     int64     `json:"total_sent"`
+	Channels      []Channel `json:"channels"`
+}
+
+type StatsFilter struct {
+	Channel string
+	Types   []string
+	BySent  bool
+	Limit   int
 }
 
 type Author struct {
 	ID       string `json:"id" gorm:"column:id"`
 	Name     string `json:"name" gorm:"column:name"`
 	Messages int64  `json:"messages" gorm:"column:messages"`
+}
+
+type Mention struct {
+	ID   string `json:"id" gorm:"column:author_id"`
+	Name string `json:"name" gorm:"column:author_name"`
 }
 
 type Message struct {
@@ -53,6 +71,7 @@ type Message struct {
 	AuthorName  string    `json:"author,omitempty" gorm:"column:author_name"`
 	Content     string    `json:"content" gorm:"column:content"`
 	Reactions   string    `json:"reactions,omitempty" gorm:"column:reactions"`
+	Mentions    []Mention `json:"mentions,omitempty" gorm:"-"`
 	Timestamp   time.Time `json:"timestamp" gorm:"-"`
 }
 
@@ -75,7 +94,7 @@ func Open(path string) (*Store, error) {
 	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro&immutable=1"}).String() //nolint:exhaustruct_v5
 
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{ //nolint:exhaustruct_v5
-		Logger: gormlogger.New(log.New(os.Stderr, "", log.LstdFlags), gormlogger.Config{LogLevel: gormlogger.Error}), //nolint:exhaustruct_v5
+		Logger: gormlogger.Discard,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open archive database: %w", err)
@@ -129,6 +148,85 @@ func (s *Store) Authors(ctx context.Context) ([]Author, error) {
 	return out, err
 }
 
+func (s *Store) Stats(ctx context.Context, f StatsFilter) (Stats, error) {
+	var totals struct {
+		Messages int64 `gorm:"column:messages"`
+		Sent     int64 `gorm:"column:sent"`
+	}
+
+	tq := f.applyChannelFilters(s.db.WithContext(ctx).
+		Table("channels c").
+		Select(`
+			COUNT(m.id) AS messages,
+			COALESCE(SUM(CASE WHEN m.direction = 'sent' THEN 1 ELSE 0 END), 0) AS sent
+		`).
+		Joins("JOIN messages m ON m.channel_id = c.id"))
+
+	if err := tq.Scan(&totals).Error; err != nil {
+		return Stats{}, err
+	}
+
+	channels, err := s.topChannels(ctx, f)
+	if err != nil {
+		return Stats{}, err
+	}
+
+	return Stats{
+		TotalMessages: totals.Messages,
+		TotalSent:     totals.Sent,
+		Channels:      channels,
+	}, nil
+}
+
+func (s *Store) topChannels(ctx context.Context, f StatsFilter) ([]Channel, error) {
+	var out []Channel
+
+	q := f.applyChannelFilters(s.db.WithContext(ctx).
+		Table("channels c").
+		Select(`
+			c.id,
+			COALESCE(c.name, c.id) AS name,
+			COALESCE(c.type, '') AS type,
+			COUNT(m.id) AS messages,
+			COALESCE(SUM(CASE WHEN m.direction = 'sent' THEN 1 ELSE 0 END), 0) AS sent
+		`).
+		Joins("JOIN messages m ON m.channel_id = c.id")).
+		Group("c.id")
+
+	if f.BySent {
+		q = q.Having("sent > 0").Order("sent DESC, messages DESC, name ASC")
+	} else {
+		q = q.Order("messages DESC, sent DESC, name ASC")
+	}
+
+	if f.Limit > 0 {
+		q = q.Limit(f.Limit)
+	}
+
+	err := q.Scan(&out).Error
+
+	return out, err
+}
+
+func (f StatsFilter) applyChannelFilters(q *gorm.DB) *gorm.DB {
+	if f.Channel != "" {
+		like := "%" + f.Channel + "%"
+		q = q.Where("c.name LIKE ? OR c.id LIKE ?", like, like)
+	}
+
+	if len(f.Types) > 0 {
+		normalized := make([]string, 0, len(f.Types)*2)
+		for _, t := range f.Types {
+			v := strings.ToLower(strings.TrimSpace(t))
+			normalized = append(normalized, v, v+" chat")
+		}
+
+		q = q.Where("LOWER(c.type) IN ?", normalized)
+	}
+
+	return q
+}
+
 func (s *Store) Messages(ctx context.Context, f Filter) ([]Message, error) {
 	q := f.apply(s.db.WithContext(ctx).
 		Table("messages m").
@@ -158,7 +256,47 @@ func (s *Store) Messages(ctx context.Context, f Filter) ([]Message, error) {
 		rows[i].Timestamp = time.UnixMilli(rows[i].ID).Local()
 	}
 
+	s.populateMentions(ctx, rows)
+
 	return rows, nil
+}
+
+func (s *Store) populateMentions(ctx context.Context, rows []Message) {
+	if len(rows) == 0 {
+		return
+	}
+
+	ids := make([]int64, len(rows))
+	for i := range rows {
+		ids[i] = rows[i].ID
+	}
+
+	var mentions []struct {
+		MessageID int64  `gorm:"column:message_id"`
+		ID        string `gorm:"column:author_id"`
+		Name      string `gorm:"column:author_name"`
+	}
+
+	err := s.db.WithContext(ctx).
+		Table("message_mentions mm").
+		Select("mm.message_id, COALESCE(mm.author_id, '') AS author_id, COALESCE(a.name, c.name, mm.author_id, '') AS author_name").
+		Joins("LEFT JOIN authors a ON a.id = mm.author_id").
+		Joins("LEFT JOIN channels c ON c.id = mm.author_id").
+		Where("mm.message_id IN ?", ids).
+		Order("mm.rowid ASC").
+		Scan(&mentions).Error
+	if err != nil || len(mentions) == 0 {
+		return
+	}
+
+	byMsg := make(map[int64][]Mention, len(mentions))
+	for _, m := range mentions {
+		byMsg[m.MessageID] = append(byMsg[m.MessageID], Mention{ID: m.ID, Name: m.Name})
+	}
+
+	for i := range rows {
+		rows[i].Mentions = byMsg[rows[i].ID]
+	}
 }
 
 func (f Filter) apply(q *gorm.DB) *gorm.DB {
@@ -285,4 +423,39 @@ func WriteAuthors(w io.Writer, authors []Author, format string) error {
 	default:
 		return fmt.Errorf("unsupported format %q (use table or json)", format)
 	}
+}
+
+func WriteStats(w io.Writer, stats Stats, format string) error {
+	switch format {
+	case formatJSON:
+		return json.NewEncoder(w).Encode(stats)
+	case formatTable:
+		t := table.New(w)
+		t.SetHeaders("Channel", "Type", "Messages", "From You")
+
+		for _, c := range stats.Channels {
+			t.AddRow(
+				c.Name,
+				c.Type,
+				formatCountPct(c.Messages, stats.TotalMessages),
+				formatCountPct(c.Sent, stats.TotalSent),
+			)
+		}
+
+		t.Render()
+
+		return nil
+	default:
+		return fmt.Errorf("unsupported format %q (use table or json)", format)
+	}
+}
+
+func formatCountPct(value, total int64) string {
+	if total <= 0 {
+		return strconv.FormatInt(value, 10)
+	}
+
+	pct := (float64(value) * 100) / float64(total)
+
+	return fmt.Sprintf("%d (%.1f%%)", value, pct)
 }
