@@ -123,16 +123,7 @@ func TestSearchModes(t *testing.T) {
 	require.NoError(t, db.Exec(`
 		CREATE TABLE authors (id TEXT PRIMARY KEY, name TEXT);
 		CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT, team_name TEXT, type TEXT, last_sync TIMESTAMP);
-		CREATE TABLE messages (
-			id INTEGER PRIMARY KEY,
-			thread_id INTEGER,
-			channel_id TEXT,
-			direction TEXT,
-			author_id TEXT,
-			content TEXT,
-			reactions TEXT,
-			timestamp TIMESTAMP
-		);
+		CREATE TABLE messages (id INTEGER PRIMARY KEY, thread_id INTEGER, channel_id TEXT, direction TEXT, author_id TEXT, content TEXT, reactions TEXT, timestamp TIMESTAMP, recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 		INSERT INTO authors VALUES ('8:orgid:00000000-0000-0000-0000-000000000001', 'Alice');
 		INSERT INTO channels (id, name, team_name, type) VALUES ('c1', 'General', 'ICTS', 'channel'), ('c2', 'Operations', '', 'channel');
 		INSERT INTO messages (id, channel_id, direction, author_id, content) VALUES
@@ -192,7 +183,7 @@ func TestModelNavigationAndScroll(t *testing.T) {
 	require.NoError(t, db.Exec(`
 		CREATE TABLE authors (id TEXT PRIMARY KEY, name TEXT);
 		CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT, team_name TEXT, type TEXT, last_sync TIMESTAMP);
-		CREATE TABLE messages (id INTEGER PRIMARY KEY, thread_id INTEGER, channel_id TEXT, direction TEXT, author_id TEXT, content TEXT, reactions TEXT, timestamp TIMESTAMP);
+		CREATE TABLE messages (id INTEGER PRIMARY KEY, thread_id INTEGER, channel_id TEXT, direction TEXT, author_id TEXT, content TEXT, reactions TEXT, timestamp TIMESTAMP, recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 		INSERT INTO authors VALUES ('8:orgid:00000000-0000-0000-0000-000000000001', 'Alice');
 		INSERT INTO channels (id, name, team_name, type) VALUES ('c1', 'General', 'ICTS', 'channel'), ('c2', 'Random', NULL, 'group chat');
 		INSERT INTO messages (id, channel_id, direction, author_id, content, reactions) VALUES

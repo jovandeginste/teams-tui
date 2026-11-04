@@ -244,7 +244,11 @@ if (process.argv.includes("--db-worker")) {
       END,
       author_id = COALESCE(messages.author_id, excluded.author_id),
       content = CASE WHEN excluded.content != '' THEN excluded.content ELSE messages.content END,
-      reactions = COALESCE(excluded.reactions, messages.reactions)
+      reactions = COALESCE(excluded.reactions, messages.reactions),
+      recorded_at = CASE
+        WHEN excluded.content != '' AND excluded.content IS NOT messages.content THEN CURRENT_TIMESTAMP
+        ELSE messages.recorded_at
+      END
   `);
   const wDeleteReactions = workerDb.prepare(`
     DELETE FROM message_reactions WHERE message_id = ?
@@ -255,6 +259,9 @@ if (process.argv.includes("--db-worker")) {
     ON CONFLICT(message_id, key) DO UPDATE SET
       emoji = COALESCE(excluded.emoji, message_reactions.emoji),
       count = excluded.count
+  `);
+  const wDeleteMentions = workerDb.prepare(`
+    DELETE FROM message_mentions WHERE message_id = ?
   `);
   const wUpsertMention = workerDb.prepare(`
     INSERT OR IGNORE INTO message_mentions (message_id, author_id)
@@ -514,6 +521,7 @@ if (process.argv.includes("--db-worker")) {
             wUpsertReaction.run(rec.id, r.key, r.emoji ?? null, r.count);
           }
         }
+        wDeleteMentions.run(rec.id);
         if (rec.mentions && rec.mentions.length > 0) {
           for (const m of rec.mentions) {
             if (!m.id) continue;
@@ -2688,13 +2696,12 @@ function computeGroupChatNameFromMessages(convMessages, convMembers = [], me = n
 function getConvLastMessageMs(conv) {
   const lastMsg = conv?.lastMessage;
   if (!lastMsg) return 0;
-  return (
-    Number(lastMsg.id || lastMsg.sequenceId) ||
-    (lastMsg.originalarrivaltime
-      ? Date.parse(lastMsg.originalarrivaltime)
-      : 0) ||
-    (lastMsg.composetime ? Date.parse(lastMsg.composetime) : 0) ||
-    0
+  return Math.max(
+    Number(lastMsg.id || lastMsg.sequenceId) || 0,
+    Number(lastMsg.version) || 0,
+    Number(lastMsg.properties?.edittime) || 0,
+    lastMsg.originalarrivaltime ? Date.parse(lastMsg.originalarrivaltime) || 0 : 0,
+    lastMsg.composetime ? Date.parse(lastMsg.composetime) || 0 : 0
   );
 }
 
@@ -2915,7 +2922,12 @@ async function syncSingleConversation(
           : null);
       if (!rawId || !/^\d{13}$/.test(String(rawId))) continue;
       const id = Number(rawId);
-      if (id > newestMsgMs) newestMsgMs = id;
+      const mVersion = Math.max(
+        id,
+        Number(m.version) || 0,
+        Number(m.properties?.edittime) || 0
+      );
+      if (mVersion > newestMsgMs) newestMsgMs = mVersion;
 
       const linkMatch = m.conversationLink?.match(/;messageid=(\d{13})/);
       const rawThreadId =
@@ -3000,7 +3012,9 @@ async function syncSingleConversation(
         prevSyncMs ||
         pagesFetched < maxPages)
     ) {
-      const syncTs = newestMsgMs || Date.now();
+      const syncTs =
+        Math.max(newestMsgMs, getConvLastMessageMs(conv), prevSyncMs || 0) ||
+        Date.now();
       updateChannelLastSync.run(syncTs, channelId, syncTs);
     }
     db.exec("COMMIT");
@@ -3790,7 +3804,7 @@ function handlePossibleSendAction(event) {
   } else if (event.type === "click") {
     if (
       !el.closest?.(
-        '[data-tid*="send"], [data-tid="newMessageCommands-send"], button[type="submit"]'
+        '[data-tid*="send"], [data-tid="newMessageCommands-send"], [data-tid*="edit-complete"], [data-tid*="save"], button[type="submit"]'
       )
     ) {
       return;
@@ -3837,6 +3851,7 @@ function start() {
   observer.observe(document.body || document.documentElement, {
     childList: true,
     subtree: true,
+    characterData: true,
     attributes: true,
     attributeFilter: ["data-mid", "aria-labelledby", "id"],
   });

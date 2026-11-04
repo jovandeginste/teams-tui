@@ -113,7 +113,7 @@ func (s *Store) LastChange(ctx context.Context) (string, error) {
 	var token string
 
 	err := s.db.WithContext(ctx).Raw(`
-		SELECT COALESCE(MAX(last_sync), '') || ':' || COUNT(*) || ':' || COALESCE(SUM(unixepoch(last_sync)), 0) || ':' || COALESCE((SELECT MAX(id) FROM messages), 0)
+		SELECT COALESCE(MAX(last_sync), '') || ':' || COUNT(*) || ':' || COALESCE(SUM(unixepoch(last_sync)), 0) || ':' || COALESCE((SELECT MAX(id) || ':' || COALESCE(MAX(recorded_at), '') FROM messages), '0:')
 		FROM channels
 	`).Scan(&token).Error
 
