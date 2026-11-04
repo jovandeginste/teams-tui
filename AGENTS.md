@@ -2,10 +2,11 @@
 
 ## Overview
 
-`teams-tui` is a read-only Go TUI and CLI for the SQLite archive (`~/.local/share/teams-archive/teams.db`) populated by `teams-for-linux` via `~/.config/home-manager/programs/teams/message-logger.js`.
+`teams-tui` is a read-only Go TUI and CLI for the SQLite archive (`~/.local/share/teams-archive/teams.db`) populated by `teams-for-linux` via `message-logger.js`.
 
 ## Repository Structure
 
+- `message-logger.js`: Electron main/renderer/worker injection script for `teams-for-linux` that populates `~/.local/share/teams-archive/teams.db`.
 - `cmd/teams-tui/main.go`: CLI entrypoint (`spf13/cobra`). Running `teams-tui` starts the interactive TUI; `teams-tui messages` prints messages for a date range (defaulting to today).
 - `pkg/archive/archive.go`: Read-only SQLite store (`gorm.io/gorm` + `github.com/glebarez/sqlite`), query filters (`ChannelsFiltered`, `Messages`), date range parsing (`ParseDate`), and `table`/`json` output (`github.com/aquasecurity/table`).
 - `pkg/archive/archive_test.go`: Unit tests for `pkg/archive`.
