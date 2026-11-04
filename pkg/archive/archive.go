@@ -109,6 +109,17 @@ func Open(path string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
+func (s *Store) LastChange(ctx context.Context) (string, error) {
+	var token string
+
+	err := s.db.WithContext(ctx).Raw(`
+		SELECT COALESCE(MAX(last_sync), '') || ':' || COUNT(*) || ':' || COALESCE(SUM(unixepoch(last_sync)), 0) || ':' || COALESCE((SELECT MAX(id) FROM messages), 0)
+		FROM channels
+	`).Scan(&token).Error
+
+	return token, err
+}
+
 func (s *Store) Channels(ctx context.Context) ([]Channel, error) {
 	return s.ChannelsFiltered(ctx, "", "")
 }

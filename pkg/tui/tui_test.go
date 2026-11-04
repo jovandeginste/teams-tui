@@ -122,7 +122,7 @@ func TestSearchModes(t *testing.T) {
 
 	require.NoError(t, db.Exec(`
 		CREATE TABLE authors (id TEXT PRIMARY KEY, name TEXT);
-		CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT, team_name TEXT, type TEXT);
+		CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT, team_name TEXT, type TEXT, last_sync TIMESTAMP);
 		CREATE TABLE messages (
 			id INTEGER PRIMARY KEY,
 			thread_id INTEGER,
@@ -134,7 +134,7 @@ func TestSearchModes(t *testing.T) {
 			timestamp TIMESTAMP
 		);
 		INSERT INTO authors VALUES ('8:orgid:00000000-0000-0000-0000-000000000001', 'Alice');
-		INSERT INTO channels VALUES ('c1', 'General', 'ICTS', 'channel'), ('c2', 'Operations', '', 'channel');
+		INSERT INTO channels (id, name, team_name, type) VALUES ('c1', 'General', 'ICTS', 'channel'), ('c2', 'Operations', '', 'channel');
 		INSERT INTO messages (id, channel_id, direction, author_id, content) VALUES
 			(1700000000000, 'c1', 'received', '8:orgid:00000000-0000-0000-0000-000000000001', 'first message'),
 			(1700000010000, 'c1', 'received', '8:orgid:00000000-0000-0000-0000-000000000001', 'needle in general'),
@@ -191,29 +191,16 @@ func TestModelNavigationAndScroll(t *testing.T) {
 
 	require.NoError(t, db.Exec(`
 		CREATE TABLE authors (id TEXT PRIMARY KEY, name TEXT);
-		CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT, team_name TEXT, type TEXT);
-		CREATE TABLE messages (
-			id INTEGER PRIMARY KEY,
-			thread_id INTEGER,
-			channel_id TEXT,
-			direction TEXT,
-			author_id TEXT,
-			content TEXT,
-			reactions TEXT,
-			timestamp TIMESTAMP
-		);
+		CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT, team_name TEXT, type TEXT, last_sync TIMESTAMP);
+		CREATE TABLE messages (id INTEGER PRIMARY KEY, thread_id INTEGER, channel_id TEXT, direction TEXT, author_id TEXT, content TEXT, reactions TEXT, timestamp TIMESTAMP);
 		INSERT INTO authors VALUES ('8:orgid:00000000-0000-0000-0000-000000000001', 'Alice');
-		INSERT INTO channels VALUES ('c1', 'General', 'ICTS', 'channel'), ('c2', 'Random', NULL, 'group chat');
+		INSERT INTO channels (id, name, team_name, type) VALUES ('c1', 'General', 'ICTS', 'channel'), ('c2', 'Random', NULL, 'group chat');
 		INSERT INTO messages (id, channel_id, direction, author_id, content, reactions) VALUES
 			(1700000000000, 'c1', 'received', '8:orgid:00000000-0000-0000-0000-000000000001', 'hello irc', '👍 1');
 	`).Error)
 
 	for i := range 20 {
-		require.NoError(t, db.Exec(
-			`INSERT INTO messages (id, channel_id, direction, author_id, content) VALUES (?, 'c2', 'sent', '8:orgid:00000000-0000-0000-0000-000000000001', ?)`,
-			1700000060000+int64(i)*1000,
-			fmt.Sprintf("msg-%02d", i),
-		).Error)
+		require.NoError(t, db.Exec(`INSERT INTO messages (id, channel_id, direction, author_id, content) VALUES (?, 'c2', 'sent', '8:orgid:00000000-0000-0000-0000-000000000001', ?)`, 1700000060000+int64(i)*1000, fmt.Sprintf("msg-%02d", i)).Error)
 	}
 
 	store, err := archive.Open(path)
@@ -239,14 +226,26 @@ func TestModelNavigationAndScroll(t *testing.T) {
 	require.Equal(t, 0, m.scrollOffset)
 	require.Contains(t, m.View(), "hello irc")
 
-	// Start a background refresh while on c1 (index 1), then switch back up to c2 (index 0)
-	// before the refresh completes; the stale refreshMsg must not revert the selection.
+	// When nothing changed in the database, refreshCmd marks the message as unchanged.
+	unchangedMsg, ok := m.refreshCmd()().(refreshMsg)
+	require.True(t, ok && unchangedMsg.unchanged)
+
+	_, _ = m.Update(unchangedMsg)
+
+	// Start a background refresh after a DB change while on c1 (index 1); a tick while it is
+	// in flight must not start a second refresh, and switching to c2 must not be reverted.
+	require.NoError(t, db.Exec(`UPDATE channels SET last_sync = CURRENT_TIMESTAMP WHERE id = 'c1'`).Error)
+
 	staleCmd := m.refreshCmd()
+	seqBeforeTick := m.refreshSeq
+	_, _ = m.Update(tickMsg{})
+	require.Equal(t, seqBeforeTick, m.refreshSeq)
 	m.handleKey("up")
 	require.Equal(t, 0, m.selected)
 	require.Equal(t, "c2", m.channelID)
 
 	_, _ = m.Update(staleCmd())
+	require.Zero(t, m.refreshInFlight)
 	require.Equal(t, 0, m.selected)
 	require.Equal(t, "c2", m.channelID)
 	require.Contains(t, m.View(), "msg-19")

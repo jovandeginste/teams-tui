@@ -21,7 +21,7 @@ func seedTestDB(t *testing.T) string {
 
 	require.NoError(t, db.Exec(`
 		CREATE TABLE authors (id TEXT PRIMARY KEY, name TEXT);
-		CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT, team_name TEXT, type TEXT);
+		CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT, team_name TEXT, type TEXT, last_sync TIMESTAMP);
 		CREATE TABLE message_mentions (
 			message_id INTEGER,
 			author_id TEXT,
@@ -39,7 +39,7 @@ func seedTestDB(t *testing.T) string {
 			recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		);
 		INSERT INTO authors VALUES ('8:orgid:1', 'Alice'), ('8:orgid:2', 'Bob');
-		INSERT INTO channels VALUES
+		INSERT INTO channels (id, name, team_name, type) VALUES
 			('19:chan1@thread.tacv2', 'General', 'ICTS', 'channel'),
 			('19:chat1@thread.v2', 'Standup', '', 'meeting chat');
 		INSERT INTO messages (id, channel_id, direction, author_id, content, reactions) VALUES

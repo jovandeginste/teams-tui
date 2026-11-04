@@ -43,33 +43,37 @@ type (
 	tickMsg     time.Time
 	clearErrMsg struct{}
 	refreshMsg  struct {
-		seq       uint64
-		channels  []archive.Channel
-		messages  []archive.Message
-		selected  int
-		channelID string
-		err       error
+		seq        uint64
+		lastChange string
+		unchanged  bool
+		channels   []archive.Channel
+		messages   []archive.Message
+		selected   int
+		channelID  string
+		err        error
 	}
 )
 
 type Model struct {
-	store         *archive.Store
-	channels      []archive.Channel
-	messages      []archive.Message
-	selected      int
-	channelID     string
-	refreshSeq    uint64
-	focusMessages bool
-	showHelp      bool
-	scrollOffset  int // lines from bottom (0 = follow latest)
-	messageLimit  int
-	searchMode    string
-	channelQuery  string
-	messageQuery  string
-	globalQuery   string
-	width         int
-	height        int
-	err           error
+	store           *archive.Store
+	channels        []archive.Channel
+	messages        []archive.Message
+	selected        int
+	channelID       string
+	lastChange      string
+	refreshSeq      uint64
+	refreshInFlight int
+	focusMessages   bool
+	showHelp        bool
+	scrollOffset    int // lines from bottom (0 = follow latest)
+	messageLimit    int
+	searchMode      string
+	channelQuery    string
+	messageQuery    string
+	globalQuery     string
+	width           int
+	height          int
+	err             error
 }
 
 func New(store *archive.Store, channelFilter ...string) *Model {
@@ -115,6 +119,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 	case tickMsg:
+		if m.refreshInFlight > 0 {
+			return m, tickCmd()
+		}
+
 		return m, tea.Batch(m.refreshCmd(), tickCmd())
 	case refreshMsg:
 		return m, m.applyRefresh(msg)
@@ -465,8 +473,10 @@ func computeThreadRoles(messages []archive.Message) []threadRole {
 
 func (m *Model) refreshCmd() tea.Cmd {
 	m.refreshSeq++
+	m.refreshInFlight++
 	seq := m.refreshSeq
 	store := m.store
+	prevChange := m.lastChange
 	channelQuery := m.channelQuery
 	globalQuery := m.globalQuery
 	msgFilter := m.activeMessageFilter()
@@ -477,13 +487,22 @@ func (m *Model) refreshCmd() tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 
+		lastChange, err := store.LastChange(ctx)
+		if err != nil {
+			return refreshMsg{seq: seq, err: err} //nolint:exhaustruct_v5
+		}
+
+		if prevChange != "" && lastChange == prevChange {
+			return refreshMsg{seq: seq, unchanged: true} //nolint:exhaustruct_v5
+		}
+
 		channels, err := store.ChannelsFiltered(ctx, channelQuery, globalQuery)
 		if err != nil {
 			return refreshMsg{seq: seq, err: err} //nolint:exhaustruct_v5
 		}
 
 		if len(channels) == 0 {
-			return refreshMsg{seq: seq, channels: channels} //nolint:exhaustruct_v5
+			return refreshMsg{seq: seq, lastChange: lastChange, channels: channels} //nolint:exhaustruct_v5
 		}
 
 		selected, channelID := resolveSelection(channels, curChannelID, curSelected)
@@ -497,19 +516,21 @@ func (m *Model) refreshCmd() tea.Cmd {
 			return refreshMsg{seq: seq, err: err} //nolint:exhaustruct_v5
 		}
 
-		return refreshMsg{
-			seq:       seq,
-			channels:  channels,
-			messages:  msgs,
-			selected:  selected,
-			channelID: channelID,
-			err:       nil,
+		return refreshMsg{ //nolint:exhaustruct_v5
+			seq:        seq,
+			lastChange: lastChange,
+			channels:   channels,
+			messages:   msgs,
+			selected:   selected,
+			channelID:  channelID,
 		}
 	}
 }
 
 func (m *Model) applyRefresh(msg refreshMsg) tea.Cmd {
-	if msg.seq != m.refreshSeq {
+	m.refreshInFlight = max(m.refreshInFlight-1, 0)
+
+	if msg.seq != m.refreshSeq || msg.unchanged {
 		return nil
 	}
 
@@ -522,6 +543,7 @@ func (m *Model) applyRefresh(msg refreshMsg) tea.Cmd {
 	}
 
 	m.err = nil
+	m.lastChange = msg.lastChange
 	m.channels = msg.channels
 	m.messages = msg.messages
 	m.selected = msg.selected
@@ -549,6 +571,7 @@ func resolveSelection(channels []archive.Channel, channelID string, selected int
 }
 
 func (m *Model) refresh() {
+	m.lastChange = ""
 	if msg, ok := m.refreshCmd()().(refreshMsg); ok {
 		_ = m.applyRefresh(msg)
 	}
