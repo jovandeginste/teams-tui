@@ -21,8 +21,8 @@
 Always use the `Makefile` targets:
 
 ```bash
-make build     # CGO_ENABLED=0 go build ./cmd/teams-tui
-make install   # CGO_ENABLED=0 go install ./cmd/teams-tui
+make build     # CGO_ENABLED=0 go build -o bin/... ./cmd/teams-tui ./cmd/teams-worker
+make install   # CGO_ENABLED=0 go install ./cmd/teams-tui ./cmd/teams-worker
 make test      # go test ./...
 make lint      # golangci-lint run --allow-parallel-runners
 make deps      # go mod tidy && go mod vendor

@@ -108,7 +108,7 @@ When launching `teams-for-linux`, ensure `node` (v22.5+) is in `PATH` or set `TE
 Use the `Makefile` targets:
 
 ```bash
-# Build ./teams-tui binary
+# Build ./bin/teams-tui and ./bin/teams-worker binaries
 make build
 
 # Install into $GOBIN / $GOPATH/bin

@@ -1,8 +1,9 @@
 .PHONY: build install test lint deps run-teams
 
 build:
-	CGO_ENABLED=0 go build ./cmd/teams-tui
-	CGO_ENABLED=0 go build ./cmd/teams-worker
+	@mkdir -p bin
+	CGO_ENABLED=0 go build -o bin/teams-tui ./cmd/teams-tui
+	CGO_ENABLED=0 go build -o bin/teams-worker ./cmd/teams-worker
 
 install:
 	CGO_ENABLED=0 go install ./cmd/teams-tui
@@ -34,7 +35,7 @@ run-teams: build
 		echo "Could not locate extracted AppDir in $$WRAPPER" >&2; \
 		exit 1; \
 	fi; \
-	export TEAMS_LOGGER_WORKER="$(CURDIR)/teams-worker"; \
+	export TEAMS_LOGGER_WORKER="$(CURDIR)/bin/teams-worker"; \
 	export TEAMS_LOGGER_SCRIPT="$(CURDIR)/message-logger.js"; \
-	echo "Starting teams-for-linux with live $(CURDIR)/message-logger.js and $(CURDIR)/teams-worker ..."; \
+	echo "Starting teams-for-linux with live $(CURDIR)/message-logger.js and $(CURDIR)/bin/teams-worker ..."; \
 	sed "s|--bind /nix /nix|--bind /nix /nix --ro-bind \"$(CURDIR)/message-logger.js\" \"$$EXTRACTED/resources/app/app/browser/message-logger.js\"|" "$$(command -v appimage-run)" | bash -s -- -w "$$EXTRACTED" -- $(TEAMS_ARGS)
