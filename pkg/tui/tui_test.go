@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/glebarez/sqlite"
 	"github.com/jovandeginste/teams-tui/pkg/archive"
 	"github.com/stretchr/testify/require"
@@ -371,4 +372,45 @@ func TestSixelImageRendering(t *testing.T) {
 	}
 
 	require.True(t, hasSixel)
+}
+
+func TestMouseTextSelection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "teams.db")
+	db, err := gorm.Open(sqlite.Open(path), &gorm.Config{}) //nolint:exhaustruct_v5
+	require.NoError(t, err)
+
+	require.NoError(t, db.Exec(`
+		CREATE TABLE authors (id TEXT PRIMARY KEY, name TEXT);
+		CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT, team_name TEXT, type TEXT, last_sync TIMESTAMP);
+		CREATE TABLE messages (id INTEGER PRIMARY KEY, thread_id INTEGER, channel_id TEXT, direction TEXT, author_id TEXT, content TEXT, reactions TEXT, timestamp TIMESTAMP, recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+		INSERT INTO authors VALUES ('8:orgid:00000000-0000-0000-0000-000000000001', 'Alice');
+		INSERT INTO channels (id, name, team_name, type) VALUES ('c1', 'General', 'ICTS', 'channel');
+		INSERT INTO messages (id, channel_id, direction, author_id, content) VALUES
+			(1700000000000, 'c1', 'received', '8:orgid:00000000-0000-0000-0000-000000000001', 'selectable text here');
+	`).Error)
+
+	var copied string
+
+	origCopy := copyClipboardFunc
+	copyClipboardFunc = func(s string) {
+		copied = s
+	}
+
+	t.Cleanup(func() {
+		copyClipboardFunc = origCopy
+	})
+
+	store, err := archive.Open(path)
+	require.NoError(t, err)
+
+	m := New(store)
+	startX := m.leftPaneWidth() + 1
+
+	_, _ = m.Update(tea.MouseMsg{X: startX, Y: 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})       //nolint:exhaustruct_v5
+	_, _ = m.Update(tea.MouseMsg{X: startX + 50, Y: 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion}) //nolint:exhaustruct_v5
+	require.True(t, m.hasSelection)
+
+	_, _ = m.Update(tea.MouseMsg{X: startX + 50, Y: 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease}) //nolint:exhaustruct_v5
+
+	require.Contains(t, copied, "selectable text here")
 }

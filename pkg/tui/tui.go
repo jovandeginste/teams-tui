@@ -80,6 +80,10 @@ type Model struct {
 	showHelp        bool
 	showAttachments bool
 	attachmentIndex int
+	selecting       bool
+	hasSelection    bool
+	selStart        textPos
+	selEnd          textPos
 	scrollOffset    int // lines from bottom (0 = follow latest)
 	messageLimit    int
 	searchMode      string
@@ -233,26 +237,64 @@ func (m *Model) activeMessageFilter() string {
 func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	inSidebar := msg.X < m.leftPaneWidth()
 
-	switch msg.Button { //nolint:exhaustive
-	case tea.MouseButtonWheelUp:
+	switch {
+	case msg.Button == tea.MouseButtonWheelUp:
 		if inSidebar {
 			m.handleChannelKey(keyUp)
 		} else {
 			m.scrollBy(wheelScrollStep)
 		}
-	case tea.MouseButtonWheelDown:
+	case msg.Button == tea.MouseButtonWheelDown:
 		if inSidebar {
 			m.handleChannelKey(keyDown)
 		} else {
 			m.scrollBy(-wheelScrollStep)
 		}
-	case tea.MouseButtonLeft:
-		if msg.Action == tea.MouseActionPress {
-			return m.handleLeftClick(msg.Y, inSidebar)
-		}
+	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft:
+		return m.handleMousePress(msg.X, msg.Y, inSidebar)
+	case msg.Action == tea.MouseActionMotion && m.selecting:
+		m.selEnd = m.mouseTextPos(msg.X, msg.Y)
+		m.hasSelection = m.selStart != m.selEnd
+	case msg.Action == tea.MouseActionRelease && m.selecting:
+		return m.handleMouseRelease(msg.X, msg.Y)
 	}
 
 	return nil
+}
+
+func (m *Model) handleMousePress(x, y int, inSidebar bool) tea.Cmd {
+	if inSidebar || y < 2 {
+		m.clearSelection()
+
+		return m.handleLeftClick(y, inSidebar)
+	}
+
+	m.focusMessages = true
+	pos := m.mouseTextPos(x, y)
+	m.selecting = true
+	m.hasSelection = false
+	m.selStart = pos
+	m.selEnd = pos
+
+	return nil
+}
+
+func (m *Model) handleMouseRelease(x, y int) tea.Cmd {
+	m.selecting = false
+	m.selEnd = m.mouseTextPos(x, y)
+
+	if m.selStart != m.selEnd {
+		m.hasSelection = true
+		if selected := m.selectedText(); selected != "" {
+			copyClipboardFunc(selected)
+		}
+
+		return nil
+	}
+
+	m.hasSelection = false
+
+	return m.handleLeftClick(y, false)
 }
 
 func (m *Model) handleLeftClick(row int, inSidebar bool) tea.Cmd {
@@ -326,6 +368,12 @@ func (m *Model) handleKey(key string) tea.Cmd {
 }
 
 func (m *Model) handleEsc() tea.Cmd {
+	if m.hasSelection {
+		m.clearSelection()
+
+		return nil
+	}
+
 	if m.clearFilters() {
 		return nil
 	}
@@ -395,6 +443,8 @@ func (m *Model) handleMessageKey(key string) {
 }
 
 func (m *Model) selectChannel(index int) {
+	m.clearSelection()
+
 	m.selected = index
 	m.channelID = m.channels[index].ID
 	m.scrollOffset = 0
@@ -1046,11 +1096,8 @@ func (m *Model) renderMessages(width, height int) string {
 	allLines := m.renderedLines()
 	total := len(allLines)
 
-	maxOffset := max(total-bodyHeight, 0)
-	offset := min(max(m.scrollOffset, 0), maxOffset)
-	end := total - offset
-	start := max(end-bodyHeight, 0)
-	visible := allLines[start:end]
+	start, end := m.visibleLineBounds(total, bodyHeight)
+	visible := m.applySelectionHighlight(allLines[start:end], start)
 
 	withBar := attachScrollbar(visible, total, start, bodyHeight, max(width-2, 10))
 	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("#44475a")).Render(strings.Repeat("─", max(width, 1)))
