@@ -559,7 +559,7 @@ func (w *Worker) resolveAndSaveAttachment(ctx context.Context, messageID int64, 
 	expectedExt := cleanExt(firstNonEmptyString(desc.Extension, extractFilenameExtension(desc.Filename)))
 	blob := w.fetchAttachmentBlob(ctx, desc, expectedExt)
 
-	if blob == nil || len(blob.buffer) == 0 {
+	if blob == nil || len(blob.buffer) == 0 || isSpacerGIF(blob.buffer) {
 		return nil
 	}
 
@@ -596,6 +596,17 @@ func (w *Worker) resolveAndSaveAttachment(ctx context.Context, messageID int64, 
 		Checksum:  checksum,
 		Extension: savedExt,
 	}
+}
+
+func isSpacerGIF(buf []byte) bool {
+	if len(buf) < 10 || !bytes.Equal(buf[:4], []byte("GIF8")) {
+		return false
+	}
+
+	w := int(buf[6]) | int(buf[7])<<8
+	h := int(buf[8]) | int(buf[9])<<8
+
+	return w <= 1 && h <= 1
 }
 
 func (w *Worker) fetchAttachmentBlob(ctx context.Context, desc AttachmentDescriptor, expectedExt string) *downloadedBlob {

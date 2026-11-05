@@ -1000,7 +1000,8 @@ function isDomContentImage(img) {
   }
   const itemid = img.getAttribute("itemid") || "";
   if (itemid && !/^0-[a-z0-9-]+$/i.test(itemid)) return false;
-  return src.startsWith("blob:") || src.startsWith("data:image/");
+  if (src.startsWith("data:image/gif")) return false;
+  return src.startsWith("blob:") || (src.startsWith("data:image/") && src.length > 200);
 }
 
 const capturedDomBlobs = new Set();
@@ -1047,7 +1048,10 @@ function captureDomBlobImages(messageId, contentEl) {
       }
     }
 
-    if (origSrc || !src.startsWith("blob:")) {
+    if (
+      origSrc ||
+      (!src.startsWith("blob:") && !src.startsWith("data:image/gif"))
+    ) {
       tasks.push({
         key,
         url: origSrc || src,
