@@ -140,6 +140,14 @@ func Open(path string) (*Store, error) {
 	return &Store{db: db, dir: filepath.Dir(path)}, nil
 }
 
+func (s *Store) Dir() string {
+	if s == nil {
+		return ""
+	}
+
+	return s.dir
+}
+
 func (s *Store) AttachmentPath(a Attachment) string {
 	if s == nil || s.dir == "" {
 		return a.RelativePath()

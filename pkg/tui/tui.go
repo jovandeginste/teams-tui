@@ -97,6 +97,8 @@ func New(store *archive.Store, channelFilter ...string) *Model {
 		query = channelFilter[0]
 	}
 
+	setArchiveDir(store.Dir())
+
 	m := &Model{ //nolint:exhaustruct_v5
 		store:        store,
 		channelQuery: query,
@@ -708,6 +710,7 @@ func (m *Model) renderHelpBox() string {
 }
 
 func overlayCenter(bg, fg string, width, height int) string {
+	bg = stripSixel(bg)
 	bgLines := strings.Split(bg, "\n")
 	fgLines := strings.Split(fg, "\n")
 
@@ -851,6 +854,14 @@ func (m *Model) linkTargetAtRow(row int) string {
 func (m *Model) resolveLineLinkTarget(msg archive.Message, line string) string {
 	if uri := extractHyperlinkURI(line); uri != "" {
 		return uri
+	}
+
+	if strings.Contains(line, "\x1bP") {
+		for _, att := range msg.Attachments {
+			if isImageAttachment(att) {
+				return m.store.AttachmentPath(att)
+			}
+		}
 	}
 
 	plain := strings.TrimSpace(ansi.Strip(line))
@@ -1141,6 +1152,8 @@ func formatIRCMessage(msg archive.Message, width int, roles ...threadRole) []str
 			}
 		}
 
+		out = appendMessageImages(out, msg.Attachments, indent, contWidth)
+
 		return applyThreadGutter(out, msg, role)
 	}
 
@@ -1152,7 +1165,17 @@ func formatIRCMessage(msg archive.Message, width int, roles ...threadRole) []str
 		out = append(out, indent+line)
 	}
 
+	out = appendMessageImages(out, msg.Attachments, indent, contWidth)
+
 	return applyThreadGutter(out, msg, role)
+}
+
+func appendMessageImages(lines []string, attachments []archive.Attachment, indent string, contWidth int) []string {
+	for _, att := range attachments {
+		lines = append(lines, renderAttachmentSixelLines(att, indent, contWidth)...)
+	}
+
+	return lines
 }
 
 func formatMessageContent(msg archive.Message) string {

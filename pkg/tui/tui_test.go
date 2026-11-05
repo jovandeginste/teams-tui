@@ -2,7 +2,12 @@ package tui
 
 import (
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/glebarez/sqlite"
@@ -319,4 +324,51 @@ func TestWrappedHyperlinkPreservesFullURL(t *testing.T) {
 	}
 
 	require.GreaterOrEqual(t, matchedChunks, 2)
+}
+
+func TestSixelImageRendering(t *testing.T) {
+	dir := t.TempDir()
+	setArchiveDir(dir)
+
+	sum := "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+	att := archive.Attachment{
+		Filename:  "test.png",
+		Checksum:  sum,
+		Extension: "png",
+	}
+
+	imgPath := att.Path(dir)
+	require.NoError(t, os.MkdirAll(filepath.Dir(imgPath), 0o755))
+
+	img := image.NewRGBA(image.Rect(0, 0, 16, 16))
+	for y := range 16 {
+		for x := range 16 {
+			img.Set(x, y, color.RGBA{R: 255, G: 0, B: 0, A: 255})
+		}
+	}
+
+	f, err := os.Create(imgPath)
+	require.NoError(t, err)
+	require.NoError(t, png.Encode(f, img))
+	require.NoError(t, f.Close())
+
+	lines := formatIRCMessage(archive.Message{ //nolint:exhaustruct_v5
+		ID:          1700000000000,
+		Direction:   testDirection,
+		AuthorID:    testAuthorID,
+		AuthorName:  testAuthorName,
+		Content:     "red square",
+		Attachments: []archive.Attachment{att},
+	}, 60)
+
+	hasSixel := false
+	for _, line := range lines {
+		if strings.Contains(line, "\x1bP0;1q") {
+			hasSixel = true
+
+			require.LessOrEqual(t, cellWidth(line), 60)
+		}
+	}
+
+	require.True(t, hasSixel)
 }
