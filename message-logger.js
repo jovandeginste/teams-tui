@@ -1,6 +1,4 @@
-const crypto = require("node:crypto");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 
 if (
@@ -11,161 +9,6 @@ if (
   delete require.cache[target];
   module.exports = require(target);
   return;
-}
-
-const ARCHIVE_DIR = path.join(os.homedir(), ".local", "share", "teams-archive");
-const ATTACHMENTS_DIR = path.join(ARCHIVE_DIR, "attachments");
-
-const MIME_EXT_MAP = {
-  "image/png": "png",
-  "image/jpeg": "jpg",
-  "image/jpg": "jpg",
-  "image/gif": "gif",
-  "image/webp": "webp",
-  "image/svg+xml": "svg",
-  "image/bmp": "bmp",
-  "image/x-icon": "ico",
-  "image/vnd.microsoft.icon": "ico",
-  "image/tiff": "tiff",
-  "image/heic": "heic",
-  "image/avif": "avif",
-  "application/pdf": "pdf",
-  "application/zip": "zip",
-  "application/x-zip-compressed": "zip",
-  "application/gzip": "gz",
-  "application/x-tar": "tar",
-  "application/x-7z-compressed": "7z",
-  "application/x-rar-compressed": "rar",
-  "application/json": "json",
-  "application/xml": "xml",
-  "text/xml": "xml",
-  "text/plain": "txt",
-  "text/csv": "csv",
-  "text/markdown": "md",
-  "text/html": "html",
-  "video/mp4": "mp4",
-  "video/webm": "webm",
-  "video/quicktime": "mov",
-  "audio/mpeg": "mp3",
-  "audio/mp4": "m4a",
-  "audio/wav": "wav",
-  "audio/ogg": "ogg",
-  "audio/webm": "weba",
-  "application/msword": "doc",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-    "docx",
-  "application/vnd.ms-excel": "xls",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
-  "application/vnd.ms-powerpoint": "ppt",
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation":
-    "pptx",
-};
-
-function cleanExtension(raw) {
-  if (!raw || typeof raw !== "string") return "";
-  const trimmed = raw.trim().replace(/^\.+/, "").toLowerCase();
-  return /^[a-z0-9]{1,15}$/.test(trimmed) ? trimmed : "";
-}
-
-function extractFilenameExtension(filename) {
-  if (!filename || typeof filename !== "string") return "";
-  const base = filename.split(/[?#]/)[0].trim();
-  return cleanExtension(path.extname(base));
-}
-
-function extensionFromContentType(contentType) {
-  if (!contentType || typeof contentType !== "string") return "";
-  const mime = contentType.split(";")[0].trim().toLowerCase();
-  return MIME_EXT_MAP[mime] || "";
-}
-
-function detectBufferExtension(buf) {
-  if (!buf || buf.length < 4) return "";
-  if (
-    buf.length >= 8 &&
-    buf[0] === 0x89 &&
-    buf[1] === 0x50 &&
-    buf[2] === 0x4e &&
-    buf[3] === 0x47
-  ) {
-    return "png";
-  }
-  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
-    return "jpg";
-  }
-  if (
-    buf.length >= 6 &&
-    buf[0] === 0x47 &&
-    buf[1] === 0x49 &&
-    buf[2] === 0x46 &&
-    buf[3] === 0x38
-  ) {
-    return "gif";
-  }
-  if (
-    buf.length >= 12 &&
-    buf.toString("ascii", 0, 4) === "RIFF" &&
-    buf.toString("ascii", 8, 12) === "WEBP"
-  ) {
-    return "webp";
-  }
-  if (buf.length >= 5 && buf.toString("ascii", 0, 5) === "%PDF-") {
-    return "pdf";
-  }
-  if (
-    buf[0] === 0x50 &&
-    buf[1] === 0x4b &&
-    buf[2] === 0x03 &&
-    buf[3] === 0x04
-  ) {
-    return "zip";
-  }
-  if (buf[0] === 0x42 && buf[1] === 0x4d) {
-    return "bmp";
-  }
-  if (buf.length >= 12 && buf.toString("ascii", 4, 8) === "ftyp") {
-    return "mp4";
-  }
-  if (buf[0] === 0x1f && buf[1] === 0x8b) {
-    return "gz";
-  }
-  return "";
-}
-
-function getAttachmentDiskPath(checksum, extension) {
-  const ext = cleanExtension(extension);
-  const fileName = ext ? `${checksum}.${ext}` : checksum;
-  return path.join(
-    ATTACHMENTS_DIR,
-    checksum.slice(0, 2),
-    checksum.slice(2, 4),
-    checksum.slice(4, 6),
-    fileName
-  );
-}
-
-async function saveAttachmentBuffer(buf, extension) {
-  const checksum = crypto.createHash("sha256").update(buf).digest("hex");
-  const ext = cleanExtension(extension);
-  const destPath = getAttachmentDiskPath(checksum, ext);
-  if (fs.existsSync(destPath)) {
-    return { checksum, extension: ext, path: destPath };
-  }
-  const dir = path.dirname(destPath);
-  await fs.promises.mkdir(dir, { recursive: true });
-  const tmpPath = `${destPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  await fs.promises.writeFile(tmpPath, buf, { mode: 0o400 });
-  await fs.promises.chmod(tmpPath, 0o400);
-  try {
-    await fs.promises.link(tmpPath, destPath);
-  } catch (err) {
-    if (err.code !== "EEXIST") {
-      await fs.promises.unlink(tmpPath).catch(() => {});
-      throw err;
-    }
-  }
-  await fs.promises.unlink(tmpPath).catch(() => {});
-  return { checksum, extension: ext, path: destPath };
 }
 
 const PANE_SELECTOR = '[data-tid="message-pane-layout"]';
@@ -446,8 +289,27 @@ let pendingRecords = [];
 let pendingAttachments = new Map();
 let pendingLastSyncs = new Map();
 let pendingGroupNameRequests = new Map();
+let pendingTokens = null;
+let drainWaiter = null;
+let remainingWorkerAttachments = 0;
 let flushTimer = null;
 let dbBridgeInitialized = false;
+
+function recordArchivedAttachmentInCache(att) {
+  if (!att?.message_id || !att?.checksum) return;
+  let list = archivedAttachmentsByMid.get(att.message_id);
+  if (!list) {
+    list = [];
+    archivedAttachmentsByMid.set(att.message_id, list);
+  }
+  if (!list.some((x) => x.checksum === att.checksum)) {
+    list.push({
+      filename: att.filename || "",
+      checksum: att.checksum,
+      extension: att.extension || "",
+    });
+  }
+}
 
 function initDbBridge() {
   if (dbBridgeInitialized) return;
@@ -479,19 +341,7 @@ function initDbBridge() {
         });
       }
       for (const att of msg.attachments || []) {
-        if (!att.message_id || !att.checksum) continue;
-        let list = archivedAttachmentsByMid.get(att.message_id);
-        if (!list) {
-          list = [];
-          archivedAttachmentsByMid.set(att.message_id, list);
-        }
-        if (!list.some((x) => x.checksum === att.checksum)) {
-          list.push({
-            filename: att.filename || "",
-            checksum: att.checksum,
-            extension: att.extension || "",
-          });
-        }
+        recordArchivedAttachmentInCache(att);
       }
       seenStateByMid.clear();
       runIdle(() => syncAll());
@@ -501,6 +351,17 @@ function initDbBridge() {
         if (cur && u.name) {
           cur.name = u.name;
         }
+      }
+    } else if (msg.type === "attachment-saved") {
+      recordArchivedAttachmentInCache(msg.attachment);
+    } else if (msg.type === "attachment-progress") {
+      remainingWorkerAttachments = Number(msg.remaining) || 0;
+    } else if (msg.type === "attachments-drained") {
+      remainingWorkerAttachments = 0;
+      if (drainWaiter) {
+        const resolve = drainWaiter;
+        drainWaiter = null;
+        resolve();
       }
     }
   });
@@ -522,6 +383,7 @@ function scheduleDbFlush() {
 
 function flushToDbWorker() {
   if (
+    !pendingTokens &&
     pendingAuthors.size === 0 &&
     pendingChannels.size === 0 &&
     pendingRecords.length === 0 &&
@@ -535,6 +397,7 @@ function flushToDbWorker() {
 
   const payload = {
     type: "flush",
+    tokens: pendingTokens,
     authors: [...pendingAuthors.values()],
     channels: [...pendingChannels.values()],
     records: pendingRecords,
@@ -542,6 +405,7 @@ function flushToDbWorker() {
     lastSyncs: [...pendingLastSyncs.values()],
     groupNameRequests: [...pendingGroupNameRequests.values()],
   };
+  pendingTokens = null;
   pendingAuthors = new Map();
   pendingChannels = new Map();
   pendingRecords = [];
@@ -667,8 +531,15 @@ function storeRecord({
   authorId,
   authorName,
   content,
+  rawContent,
+  subject,
+  messageType,
+  rawEmotions,
+  rawMentions,
+  rawFiles,
   reactions,
   mentions,
+  attachmentTasks,
 }) {
   if (channelId) {
     upsertChannel.run(
@@ -702,9 +573,17 @@ function storeRecord({
     authorId: authorId ?? null,
     authorName: authorName ?? null,
     content: content ?? "",
+    rawContent: rawContent ?? "",
+    subject: subject ?? "",
+    messageType: messageType ?? "",
+    rawEmotions: rawEmotions ?? null,
+    rawMentions: rawMentions ?? null,
+    rawFiles: rawFiles ?? null,
     reactionsSummary,
     reactions: reactions && reactions.length > 0 ? reactions : null,
     mentions: mentions && mentions.length > 0 ? mentions : null,
+    attachmentTasks:
+      attachmentTasks && attachmentTasks.length > 0 ? attachmentTasks : null,
   });
   scheduleDbFlush();
 }
@@ -781,18 +660,6 @@ function getCurrentUser(extraChannelIds = []) {
   return { id, name };
 }
 
-function formatDurationSeconds(sec) {
-  if (! Number.isFinite(sec) || sec <= 0) return "";
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  const s = sec % 60;
-  const parts = [];
-  if (h > 0) parts.push(`${h}h`);
-  if (m > 0) parts.push(`${m}m`);
-  if (s > 0 || parts.length === 0) parts.push(`${s}s`);
-  return parts.join(" ");
-}
-
 function resolvePersonName(rawId, fallback = null) {
   const id = normalizeAuthorId(rawId);
   if (!id) return fallback || null;
@@ -806,171 +673,6 @@ function resolvePersonName(rawId, fallback = null) {
 const PARTLIST_ENTRY_RE =
   /(8:orgid:[0-9a-f-]{36}|8:live:\.cid\.[0-9a-f]+|8:live:[a-z0-9_.-]+|8:teamsvisitor:[0-9a-f]{32}|28:(?:app:)?[0-9a-f_-]{36,73})([^0-9\n]*?)(\d+)(?=8:orgid:|8:live:|8:teamsvisitor:|28:|[A-Za-z0-9._%+-]+@|\r|\n|$)/gi;
 
-function formatEventContent(rawContent, msgType = "") {
-  if (!rawContent) return "";
-  const text = String(rawContent).trim();
-  if (!text) return "";
-
-  // 1. Raw XML payloads from ChatSvc API
-  if (text.startsWith("<")) {
-    if (/<callEventType>\s*callStarted\s*<\/callEventType>/i.test(text) || /<partlist\b[^>]*type="callStarted"/i.test(text)) {
-      const org = text.match(/<Organizer>([^<]+)<\/Organizer>/i)?.[1]?.trim();
-      return org ? `Call started (${org})` : "Call started";
-    }
-    if (/<callEventType>\s*callEnded\s*<\/callEventType>/i.test(text) || /<partlist\b/i.test(text)) {
-      const parts = [];
-      const seen = new Set();
-      for (const m of text.matchAll(/<part\b[^>]*>([\s\S]*?)<\/part>/gi)) {
-        const inner = m[1];
-        const rawId = inner.match(/<name>([^<]+)<\/name>/i)?.[1]?.trim();
-        const disp = inner.match(/<displayName>([^<]+)<\/displayName>/i)?.[1]?.trim();
-        const dur = Number(inner.match(/<duration>(\d+)<\/duration>/i)?.[1] || 0);
-        const normId = normalizeAuthorId(rawId);
-        if (normId && disp && !normId.startsWith("28:") && !normId.startsWith("4:")) {
-          upsertAuthor.run(normId, disp);
-        }
-        const name = resolvePersonName(rawId, disp);
-        if (!name || name === "bot" || name === "app" || seen.has(name)) continue;
-        seen.add(name);
-        const durStr = formatDurationSeconds(dur);
-        parts.push(durStr ? `${name} (${durStr})` : name);
-      }
-      return parts.length > 0 ? `Call ended — ${parts.join(", ")}` : "Call ended";
-    }
-    if (/<(?:addmember|deletemember|roleupdate)\b/i.test(text)) {
-      const isDelete = /<deletemember\b/i.test(text);
-      const isRole = /<roleupdate\b/i.test(text);
-      const action = isDelete
-        ? "removed"
-        : isRole
-          ? "updated role for"
-          : "added";
-      const initiatorId = text.match(/<initiator>([^<]+)<\/initiator>/i)?.[1]?.trim();
-      const initiator = resolvePersonName(initiatorId);
-      const allTargetNames = [];
-      const targets = [];
-      for (const tm of text.matchAll(/<target>([^<]+)<\/target>/gi)) {
-        const name = resolvePersonName(tm[1].trim());
-        if (name && !allTargetNames.includes(name)) allTargetNames.push(name);
-        if (name && name !== initiator && !targets.includes(name)) targets.push(name);
-      }
-      if (initiator && targets.length > 0) return `${initiator} ${action} ${targets.join(", ")}`;
-      if (targets.length > 0) return `Members ${action}: ${targets.join(", ")}`;
-      if (isDelete && initiator && allTargetNames.includes(initiator)) return `${initiator} left`;
-      if (initiator && allTargetNames.length > 0) return `${initiator} ${action} ${allTargetNames.join(", ")}`;
-    }
-    if (/<topicupdate\b/i.test(text)) {
-      const initiator = resolvePersonName(text.match(/<initiator>([^<]+)<\/initiator>/i)?.[1]);
-      const val = htmlToText(text.match(/<value>([\s\S]*?)<\/value>/i)?.[1] || "");
-      return initiator ? `${initiator} changed topic to "${val}"` : `Topic changed to "${val}"`;
-    }
-  }
-
-  // 2. JSON event payloads
-  if (text.startsWith("{")) {
-    try {
-      const obj = JSON.parse(text);
-      if (Array.isArray(obj.members)) {
-        const initiator = resolvePersonName(obj.initiator);
-        const members = obj.members
-          .map((m) => resolvePersonName(m.id, m.friendlyname?.trim() || null))
-          .filter((n) => n && n !== initiator);
-        if (initiator && members.length > 0) return `${initiator} added ${members.join(", ")}`;
-        if (members.length > 0) return `Added ${members.join(", ")}`;
-      }
-      if (typeof obj.topic === "string") {
-        const user = resolvePersonName(obj.user);
-        return user ? `${user} changed topic to "${obj.topic}"` : `Topic changed to "${obj.topic}"`;
-      }
-      if ("newValue" in obj) {
-        const user = resolvePersonName(obj.user);
-        let summary = String(obj.newValue ?? "").trim();
-        if (summary.startsWith("[")) {
-          try {
-            const arr = JSON.parse(summary);
-            if (Array.isArray(arr)) {
-              const names = arr.map((x) => x?.name).filter(Boolean);
-              if (names.length > 0) {
-                return user
-                  ? `${user} updated channels (${names.join(", ")})`
-                  : `Updated channels (${names.join(", ")})`;
-              }
-            }
-          } catch {
-            // keep raw summary
-          }
-        }
-        summary = summary.replace(/\s+/g, " ");
-        return user ? `${user} updated description: "${summary}"` : `Updated description: "${summary}"`;
-      }
-    } catch {
-      // Fall through to legacy stripped XML patterns
-    }
-  }
-
-  // 3. Stripped XML callStarted
-  if (/(?:^|false|true|Adhoc|Scheduled|Recurring|Occurrence)callStarted\b/i.test(text)) {
-    const orgMatch = text.match(/([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})(?:Scheduled|Recurring|Adhoc)/i);
-    return orgMatch ? `Call started (${orgMatch[1]})` : "Call started";
-  }
-
-  // 4. Stripped XML callEnded / partlist with participant durations
-  if (
-    text.includes("callEnded") ||
-    /^(?:8:orgid:|8:live:|8:teamsvisitor:|28:)/.test(text) ||
-    /^\d{13}(?:8:orgid:|19:)/.test(text)
-  ) {
-    // Check if it's a member-add/update event containing 13-digit epoch timestamps and no names
-    const withoutTimestamps = text.replace(/\d{13}/g, " ");
-    const idMatches = [
-      ...withoutTimestamps.matchAll(
-        /(8:orgid:[0-9a-f-]{36}|8:teamsvisitor:[0-9a-f]{32}|28:app:[0-9a-f_-]+|28:[0-9a-f-]{36})/gi
-      ),
-    ].map((m) => m[1]);
-
-    if (/\d{13}/.test(text) && !text.includes("callEnded") && idMatches.length > 0) {
-      const startsWithTs = /^\d{13}/.test(text);
-      const initiatorRaw = startsWithTs ? idMatches[0] : idMatches[idMatches.length - 1];
-      const initiator = resolvePersonName(initiatorRaw);
-      const targets = [];
-      for (const raw of idMatches) {
-        const name = resolvePersonName(raw);
-        if (name && name !== initiator && !targets.includes(name)) targets.push(name);
-      }
-      if (initiator && targets.length > 0) return `${initiator} added ${targets.join(", ")}`;
-      if (
-        initiator &&
-        idMatches.length === 2 &&
-        normalizeAuthorId(idMatches[0]) === normalizeAuthorId(idMatches[1])
-      ) {
-        return `${initiator} left`;
-      }
-      if (initiator) return `${initiator} updated conversation`;
-    }
-
-    const parts = [];
-    const seen = new Set();
-    PARTLIST_ENTRY_RE.lastIndex = 0;
-    for (const m of text.matchAll(PARTLIST_ENTRY_RE)) {
-      const rawId = m[1];
-      const inlineName = m[2]?.trim() || null;
-      const dur = Number(m[3]);
-      if (rawId.startsWith("28:")) continue;
-      const name = resolvePersonName(rawId, inlineName);
-      if (!name || seen.has(name)) continue;
-      seen.add(name);
-      const durStr = formatDurationSeconds(dur);
-      parts.push(durStr ? `${name} (${durStr})` : name);
-    }
-    if (parts.length > 0 || text.includes("callEnded")) {
-      return parts.length > 0 ? `Call ended — ${parts.join(", ")}` : "Call ended";
-    }
-  }
-
-  return msgType && !msgType.startsWith("RichText") && msgType !== "Text"
-    ? htmlToText(text)
-    : text;
-}
 function getContentEl(mid) {
   return (
     document.getElementById(`content-${mid}`) ||
@@ -1272,30 +974,6 @@ function isEmojiOrAvatarUrl(url) {
   );
 }
 
-function isHtmlContentImageTag(tag) {
-  if (!tag || typeof tag !== "string") return false;
-  if (/itemtype=(?:"|')http:\/\/schema\.skype\.com\/Emoji(?:"|')/i.test(tag)) {
-    return false;
-  }
-  if (/\bclass=(?:"|')[^"']*(?:emoticon|emoji)[^"']*(?:"|')/i.test(tag)) {
-    return false;
-  }
-  if (
-    /itemtype=(?:"|')http:\/\/schema\.skype\.com\/AMSImage(?:"|')/i.test(tag) ||
-    /data-tid=(?:"|')rich-text-ima-image(?:"|')/i.test(tag)
-  ) {
-    return true;
-  }
-  const srcMatch =
-    tag.match(/\bdata-orig-src=(?:"([^"]*)"|'([^']*)')/i) ||
-    tag.match(/\bsrc=(?:"([^"]*)"|'([^']*)')/i);
-  const src = srcMatch?.[1] ?? srcMatch?.[2] ?? "";
-  if (!src || isEmojiOrAvatarUrl(src)) return false;
-  if (isAmsOrMediaUrl(src)) return true;
-  if (/\bitemid=(?:"|')[^"']+(?:"|')/i.test(tag)) return false;
-  return src.startsWith("data:image/");
-}
-
 function isDomContentImage(img) {
   if (!img || img.tagName !== "IMG") return false;
   const itemtype = img.getAttribute("itemtype") || "";
@@ -1322,313 +1000,63 @@ function isDomContentImage(img) {
   }
   const itemid = img.getAttribute("itemid") || "";
   if (itemid && !/^0-[a-z0-9-]+$/i.test(itemid)) return false;
-  if (src.startsWith("blob:") || src.startsWith("data:image/")) {
-    return true;
-  }
-  return false;
+  return src.startsWith("blob:") || src.startsWith("data:image/");
 }
 
-function getHtmlAttr(tag, attrName) {
-  const re = new RegExp(
-    `\\b${attrName}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>` + "`" + `]+))`,
-    "i"
-  );
-  const m = tag.match(re);
-  if (!m) return "";
-  return decodeEntities(m[1] ?? m[2] ?? m[3] ?? "").trim();
-}
+const capturedDomBlobs = new Set();
 
-function sanitizeAttachmentFilename(raw, fallbackExt = "") {
-  if (!raw || typeof raw !== "string") return "";
-  let cleaned = raw
-    .replace(/[\r\n\t]+/g, " ")
-    .replace(/^.*[\\/]/, "")
-    .split(/[?#]/)[0]
-    .trim();
-  if (
-    !cleaned ||
-    cleaned.toLowerCase() === "image" ||
-    cleaned.toLowerCase() === "afbeelding" ||
-    cleaned.toLowerCase() === "picture"
-  ) {
-    return fallbackExt ? `image.${fallbackExt}` : "";
-  }
-  if (fallbackExt && !extractFilenameExtension(cleaned)) {
-    cleaned = `${cleaned}.${fallbackExt}`;
-  }
-  return cleaned;
-}
-
-function extractFilenameFromUrl(url) {
-  if (!url || typeof url !== "string" || url.startsWith("data:") || url.startsWith("blob:")) {
-    return "";
-  }
-  try {
-    const parsed = new URL(url);
-    const base = path.posix.basename(decodeURIComponent(parsed.pathname));
-    if (!base || base === "imgo" || base === "original" || base === "imgt1" || base === "$value" || base === "content") {
-      return "";
-    }
-    return sanitizeAttachmentFilename(base);
-  } catch {
-    return "";
-  }
-}
-
-function mergeAttachmentDescriptors(list) {
-  const byKey = new Map();
-  for (const item of list) {
-    if (!item?.key) continue;
-    const prev = byKey.get(item.key);
-    if (!prev) {
-      byKey.set(item.key, { ...item });
-      continue;
-    }
-    byKey.set(item.key, {
-      ...prev,
-      ...item,
-      url: item.url || prev.url || null,
-      blobUrl: item.blobUrl || prev.blobUrl || null,
-      shareUrl: item.shareUrl || prev.shareUrl || null,
-      siteUrl: item.siteUrl || prev.siteUrl || null,
-      serverRelativeUrl: item.serverRelativeUrl || prev.serverRelativeUrl || null,
-      filename:
-        (item.filename && !item.filename.startsWith("image.")
-          ? item.filename
-          : prev.filename) ||
-        item.filename ||
-        prev.filename ||
-        "",
-      extension: item.extension || prev.extension || "",
-    });
-  }
-  return [...byKey.values()];
-}
-
-function buildFileObjectAttachment(f) {
-  if (!f || typeof f !== "object") return null;
-  const fileInfo = f.fileInfo && typeof f.fileInfo === "object" ? f.fileInfo : null;
-  const fileUrl =
-    fileInfo?.fileUrl ||
-    f.fileUrl ||
-    f.objectUrl ||
-    f.botFileProperties?.url ||
-    f.contentUrl ||
-    f.downloadUrl ||
-    fileInfo?.shareUrl ||
-    null;
-  const shareUrl = fileInfo?.shareUrl || f.shareUrl || null;
-  const siteUrl = fileInfo?.siteUrl || f.baseUrl || null;
-  const serverRelativeUrl = fileInfo?.serverRelativeUrl || null;
-  if (!fileUrl && !shareUrl && !(siteUrl && serverRelativeUrl)) return null;
-
-  const rawName =
-    f.fileName ||
-    f.title ||
-    f.name ||
-    fileInfo?.fileName ||
-    extractFilenameFromUrl(fileUrl || shareUrl) ||
-    "";
-  const ext = cleanExtension(
-    f.fileType ||
-      f.type ||
-      fileInfo?.fileType ||
-      extractFilenameExtension(rawName) ||
-      extractFilenameExtension(fileUrl || "")
-  );
-  const filename = sanitizeAttachmentFilename(rawName, ext);
-  const key =
-    f.itemid ||
-    f.id ||
-    fileInfo?.itemId ||
-    fileUrl ||
-    shareUrl ||
-    `${siteUrl || ""}:${serverRelativeUrl || ""}`;
-
-  return {
-    key: `file:${key}`,
-    url: fileUrl || shareUrl,
-    blobUrl: null,
-    shareUrl,
-    siteUrl,
-    serverRelativeUrl,
-    filename,
-    extension: ext,
-    isInlineImage: false,
-  };
-}
-
-function extractChatSvcAttachments(m) {
-  if (!m || typeof m !== "object") return [];
-  const out = [];
-
-  let rawFiles = m.properties?.files ?? m.files;
-  if (typeof rawFiles === "string" && rawFiles.trim()) {
-    try {
-      rawFiles = JSON.parse(rawFiles);
-    } catch {
-      rawFiles = null;
-    }
-  }
-  if (Array.isArray(rawFiles)) {
-    for (const f of rawFiles) {
-      const desc = buildFileObjectAttachment(f);
-      if (desc) out.push(desc);
-    }
-  }
-
-  const html = typeof m.content === "string" ? m.content : "";
-  if (html) {
-    for (const match of html.matchAll(/<img\b[^>]*>/gi)) {
-      const tag = match[0];
-      if (!isHtmlContentImageTag(tag)) continue;
-      const origSrc = getHtmlAttr(tag, "data-orig-src");
-      const src = getHtmlAttr(tag, "src");
-      const url = origSrc || src;
-      if (!url) continue;
-      const amsId = extractAmsObjectId(
-        url,
-        getHtmlAttr(tag, "id") || getHtmlAttr(tag, "itemid")
+function captureDomBlobImages(messageId, contentEl) {
+  if (!contentEl || !messageId) return [];
+  const tasks = [];
+  for (const img of contentEl.querySelectorAll("img")) {
+    if (!isDomContentImage(img)) continue;
+    const origSrc = img.getAttribute("data-orig-src") || "";
+    const src = img.currentSrc || img.getAttribute("src") || "";
+    const amsId =
+      extractAmsObjectId(
+        origSrc,
+        img.getAttribute("id") || img.getAttribute("itemid")
+      ) ||
+      extractAmsObjectId(
+        src,
+        img.getAttribute("id") || img.getAttribute("itemid")
       );
-      const rawName =
-        getHtmlAttr(tag, "data-file-name") ||
-        getHtmlAttr(tag, "title") ||
-        getHtmlAttr(tag, "alt") ||
-        "";
-      const ext = extractFilenameExtension(rawName);
-      const filename = sanitizeAttachmentFilename(rawName, ext);
-      out.push({
-        key: amsId ? `ams:${amsId}` : `img:${url}`,
-        url: url.startsWith("blob:") ? null : url,
-        blobUrl: url.startsWith("blob:") || url.startsWith("data:") ? url : null,
-        shareUrl: null,
-        siteUrl: null,
-        serverRelativeUrl: null,
+    const filename =
+      img.getAttribute("data-file-name") ||
+      img.getAttribute("title") ||
+      img.getAttribute("alt") ||
+      "";
+    const key = amsId ? `ams:${amsId}` : `img:${origSrc || src}`;
+
+    if (src.startsWith("blob:")) {
+      const blobKey = `${messageId}:${key}`;
+      if (!capturedDomBlobs.has(blobKey)) {
+        capturedDomBlobs.add(blobKey);
+        void nativeFetch(src)
+          .then((r) => (r.ok ? r.arrayBuffer() : null))
+          .then((ab) => {
+            if (!ab || ab.byteLength === 0) return;
+            pendingAttachments.set(blobKey, {
+              messageId,
+              filename,
+              dataBase64: Buffer.from(ab).toString("base64"),
+            });
+            scheduleDbFlush();
+          })
+          .catch(() => {});
+      }
+    }
+
+    if (origSrc || !src.startsWith("blob:")) {
+      tasks.push({
+        key,
+        url: origSrc || src,
         filename,
-        extension: ext,
-        isInlineImage: true,
-      });
-    }
-
-    for (const match of html.matchAll(/<URIObject\b([^>]*)>([\s\S]*?)<\/URIObject>/gi)) {
-      const attrs = match[1] || "";
-      const inner = match[2] || "";
-      const uri = getHtmlAttr(`<URIObject ${attrs}>`, "uri");
-      const thumb = getHtmlAttr(`<URIObject ${attrs}>`, "url_thumbnail");
-      const objType = getHtmlAttr(`<URIObject ${attrs}>`, "type").toLowerCase();
-      const origNameMatch = inner.match(/<OriginalName\b[^>]*\bv=(?:"([^"]*)"|'([^']*)')/i);
-      const titleMatch = inner.match(/<Title>([^<]*)<\/Title>/i);
-      const rawName = decodeEntities(
-        origNameMatch?.[1] ?? origNameMatch?.[2] ?? titleMatch?.[1] ?? ""
-      ).trim();
-
-      let targetUrl = uri || thumb;
-      if (uri && /\/v1\/objects\/[^/?#]+$/i.test(uri)) {
-        if (objType.startsWith("picture")) {
-          targetUrl = `${uri}/views/imgo`;
-        } else if (objType.startsWith("video")) {
-          targetUrl = `${uri}/views/video`;
-        } else if (objType.startsWith("audio")) {
-          targetUrl = `${uri}/views/audio`;
-        } else {
-          targetUrl = `${uri}/views/original`;
-        }
-      }
-      if (!targetUrl) continue;
-      const amsId = extractAmsObjectId(targetUrl, getHtmlAttr(`<URIObject ${attrs}>`, "doc_id"));
-      const ext = extractFilenameExtension(rawName);
-      out.push({
-        key: amsId ? `ams:${amsId}` : `uri:${targetUrl}`,
-        url: targetUrl,
-        blobUrl: null,
-        shareUrl: null,
-        siteUrl: null,
-        serverRelativeUrl: null,
-        filename: sanitizeAttachmentFilename(rawName, ext),
-        extension: ext,
-        isInlineImage: objType.startsWith("picture"),
-      });
-    }
-  }
-
-  return mergeAttachmentDescriptors(out);
-}
-
-function extractDomAttachments(msg, mid, contentEl) {
-  const out = [];
-  const fiberMsg = getFiberMessage(msg);
-  if (fiberMsg) {
-    out.push(...extractChatSvcAttachments(fiberMsg));
-  }
-
-  if (contentEl) {
-    for (const img of contentEl.querySelectorAll("img")) {
-      if (!isDomContentImage(img)) continue;
-      const origSrc = img.getAttribute("data-orig-src") || "";
-      const src = img.currentSrc || img.getAttribute("src") || "";
-      const amsId =
-        extractAmsObjectId(
-          origSrc,
-          img.getAttribute("id") || img.getAttribute("itemid")
-        ) ||
-        extractAmsObjectId(
-          src,
-          img.getAttribute("id") || img.getAttribute("itemid")
-        );
-      const rawName =
-        img.getAttribute("data-file-name") ||
-        img.getAttribute("title") ||
-        img.getAttribute("alt") ||
-        "";
-      const ext = extractFilenameExtension(rawName);
-      const isBlobOrData = src.startsWith("blob:") || src.startsWith("data:");
-      const netUrl = origSrc || (!isBlobOrData ? src : null);
-      if (!netUrl && !isBlobOrData) continue;
-      out.push({
-        key: amsId ? `ams:${amsId}` : `img:${netUrl || src}`,
-        url: netUrl,
-        blobUrl: isBlobOrData ? src : null,
-        shareUrl: null,
-        siteUrl: null,
-        serverRelativeUrl: null,
-        filename: sanitizeAttachmentFilename(rawName, ext),
-        extension: ext,
         isInlineImage: true,
       });
     }
   }
-
-  const host =
-    document.getElementById(`message-body-${mid}`) ||
-    msg.closest?.(`[id="message-body-${mid}"]`) ||
-    msg.closest?.('[data-tid="chat-pane-item"]') ||
-    msg;
-  if (host) {
-    const fileNodes = host.querySelectorAll(
-      '[data-tid*="file-attachment"], [data-tid*="file-chiclet"], [data-tid="file-preview-root"], [data-tid*="attachment"]'
-    );
-    for (const node of fileNodes) {
-      const fKey = Object.keys(node).find((k) => k.startsWith("__reactFiber$"));
-      let fiber = fKey ? node[fKey] : null;
-      for (let i = 0; i < 15 && fiber; i++, fiber = fiber.return) {
-        const p = fiber.memoizedProps;
-        if (!p) continue;
-        const candidates = [
-          p.file,
-          p.attachment,
-          p.item,
-          ...(Array.isArray(p.files) ? p.files : []),
-          ...(Array.isArray(p.attachments) ? p.attachments : []),
-        ];
-        for (const c of candidates) {
-          const desc = buildFileObjectAttachment(c);
-          if (desc) out.push(desc);
-        }
-      }
-    }
-  }
-
-  return mergeAttachmentDescriptors(out);
+  return tasks;
 }
 
 function extractConvIdFromFiber(el) {
@@ -2092,20 +1520,14 @@ function syncPane(pane) {
 
     const contentEl = getContentEl(mid);
     const subject = getSubjectText(msg, mid);
+    const fiberMsg = getFiberMessage(msg);
     let body = extractDomTextWithEmojis(contentEl);
-    if (!body) {
-      const fiberMsg = getFiberMessage(msg);
-      if (typeof fiberMsg?.content === "string" && fiberMsg.content.trim()) {
-        body = htmlToText(fiberMsg.content);
-      }
-    }
     if (direction === "event" || /^(?:callStarted|callEnded)\b/.test(body)) {
       if (!subject) {
         direction = "event";
         authorId = null;
         authorName = null;
       }
-      body = formatEventContent(body);
     }
     const content =
       subject && body && body !== subject
@@ -2113,14 +1535,16 @@ function syncPane(pane) {
         : subject || body;
     const reactions = extractDomReactions(msg, mid);
     const mentions = extractDomMentions(contentEl);
-    const attachments = extractDomAttachments(msg, mid, contentEl);
+    const attachmentTasks = captureDomBlobImages(id, contentEl);
+    const rawContent =
+      typeof fiberMsg?.content === "string" ? fiberMsg.content : "";
+    const rawFiles = fiberMsg?.properties?.files ?? fiberMsg?.files ?? null;
     const mentionKey = mentions.map((m) => m.id).join(",");
-    const attachmentKey = attachments
-      .map((a) => `${a.key}:${a.blobUrl ? 1 : 0}`)
-      .join(",");
-    const stateKey = `${authorId ?? ""}|${content}|${formatReactionsSummary(reactions) ?? ""}|${mentionKey}|${attachmentKey}`;
+    const attKey = `${attachmentTasks.length}:${rawFiles ? 1 : 0}`;
+    const stateKey = `${authorId ?? ""}|${content}|${rawContent.length}|${formatReactionsSummary(reactions) ?? ""}|${mentionKey}|${attKey}`;
     if (seenStateByMid.get(mid) === stateKey) continue;
 
+    void refreshAuthTokensForWorker(coreServicesFromWindow(), [rawFiles]);
     storeRecord({
       id,
       threadId,
@@ -2132,12 +1556,16 @@ function syncPane(pane) {
       authorId,
       authorName,
       content,
+      rawContent,
+      subject,
+      messageType: fiberMsg?.messagetype || fiberMsg?.messageType || "",
+      rawEmotions: fiberMsg?.properties?.emotions ?? fiberMsg?.emotions ?? null,
+      rawMentions: fiberMsg?.properties?.mentions ?? fiberMsg?.mentions ?? null,
+      rawFiles,
       reactions,
       mentions,
+      attachmentTasks,
     });
-    if (attachments.length > 0) {
-      queueAttachmentDownloads(id, attachments);
-    }
     seenStateByMid.set(mid, stateKey);
     updatedAnyMessage = true;
   }
@@ -2265,176 +1693,8 @@ let resumeWaiter = null;
 let lastStatusText = "";
 let hideTimer = null;
 
-const ENTITIES = {
-  amp: "&",
-  lt: "<",
-  gt: ">",
-  quot: '"',
-  apos: "'",
-  nbsp: " ",
-};
-
-const SKYPE_EMOJI_MAP = {
-  like: "👍",
-  heart: "❤️",
-  laugh: "😆",
-  surprised: "😮",
-  sad: "😢",
-  angry: "😠",
-  ok: "👌",
-  think: "🤔",
-  yes: "👍",
-};
-
-function emojiFromItemId(itemId) {
-  if (!itemId) return "";
-  if (SKYPE_EMOJI_MAP[itemId]) return SKYPE_EMOJI_MAP[itemId];
-  const hexMatch = itemId.match(/^([0-9a-f]{4,6})_/i);
-  if (hexMatch) {
-    const cp = parseInt(hexMatch[1], 16);
-    if (cp > 0) return String.fromCodePoint(cp);
-  }
-  return `:${itemId}:`;
-}
-
-function decodeEntities(str) {
-  return str.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (match, ent) => {
-    const lower = ent.toLowerCase();
-    if (lower in ENTITIES) return ENTITIES[lower];
-    if (lower.startsWith("#x")) {
-      return String.fromCodePoint(parseInt(lower.slice(2), 16) || 0);
-    }
-    if (lower.startsWith("#")) {
-      return String.fromCodePoint(parseInt(lower.slice(1), 10) || 0);
-    }
-    return match;
-  });
-}
-
-function htmlToText(html, codePlaceholders = []) {
-  if (!html) return "";
-  const stashCode = (text) => {
-    const token = `\x00CODE_${codePlaceholders.length}\x00`;
-    codePlaceholders.push(text);
-    return token;
-  };
-
-  const processed = String(html)
-    .replace(/\r\n?/g, "\n")
-    .replace(/<pre\b([^>]*)>([\s\S]*?)<\/pre>/gi, (_m, attrs, inner) => {
-      const langMatch = attrs.match(/\blanguage-([a-z0-9_+-]+)/i);
-      const lang = normalizeCodeLang(langMatch?.[1]);
-      const code = decodeEntities(
-        inner
-          .replace(/<br\s*\/?>/gi, "\n")
-          .replace(/<\/(p|div|li)>/gi, "\n")
-          .replace(/<[^>]+>/g, "")
-      )
-        .replace(/\u00a0/g, " ")
-        .replace(/\r\n?/g, "\n")
-        .replace(/\n+$/, "");
-      return `\n${stashCode(`\`\`\`${lang}\n${code}\n\`\`\``)}\n`;
-    })
-    .replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (_m, inner) => {
-      const code = decodeEntities(
-        inner.replace(/<br\s*\/?>/gi, "\n").replace(/<[^>]+>/g, "")
-      )
-        .replace(/\u00a0/g, " ")
-        .replace(/\r\n?/g, "\n");
-      return stashCode(`\`${code}\``);
-    })
-    .replace(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi, (_m, inner) => {
-      const authorMatch = inner.match(
-        /<strong\b[^>]*itemprop="mri"[^>]*>([\s\S]*?)<\/strong>/i
-      );
-      const timeMatch = inner.match(
-        /<span\b[^>]*itemprop="time"[^>]*>([\s\S]*?)<\/span>/i
-      );
-      const previewMatch = inner.match(
-        /<p\b[^>]*itemprop="preview"[^>]*>([\s\S]*?)<\/p>/i
-      );
-      if (authorMatch || previewMatch) {
-        const author = htmlToText(authorMatch?.[1] || "", codePlaceholders);
-        const time = htmlToText(timeMatch?.[1] || "", codePlaceholders);
-        const preview = htmlToText(previewMatch?.[1] || "", codePlaceholders);
-        return `\n${formatQuoteBlock(author, time, preview)}`;
-      }
-      const body = htmlToText(inner, codePlaceholders);
-      return `\n${formatQuoteBlock("", "", body)}`;
-    })
-    .replace(/<URIObject\b[\s\S]*?<\/URIObject>/gi, "")
-    .replace(/<(?:img|emoji)\b[^>]*>/gi, (tag) => {
-      if (/^<img\b/i.test(tag) && isHtmlContentImageTag(tag)) return "";
-      const altMatch = tag.match(/\balt=(?:"([^"]*)"|'([^']*)')/i);
-      if (altMatch) return altMatch[1] ?? altMatch[2] ?? "";
-      const idMatch = tag.match(/\b(?:itemid|id)=(?:"([^"]*)"|'([^']*)')/i);
-      if (idMatch) return emojiFromItemId(idMatch[1] ?? idMatch[2]);
-      return "";
-    })
-    .replace(
-      /<readonly\b[^>]*itemtype="http:\/\/schema\.skype\.com\/Mention"[^>]*>([\s\S]*?)<\/readonly>/gi,
-      "$1 "
-    )
-    .replace(
-      /<span\b[^>]*itemtype="http:\/\/schema\.skype\.com\/Mention"[^>]*>([\s\S]*?)<\/span>/gi,
-      "$1 "
-    )
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(p|div|li|tr|h[1-6]|blockquote|pre)>/gi, "\n")
-    .replace(/<[^>]+>/g, "");
-
-  return decodeEntities(processed)
-    .replace(/\u00a0/g, " ")
-    .replace(/\x00CODE_(\d+)\x00/g, (_m, idx) => codePlaceholders[Number(idx)] ?? "")
-    .replace(/\r\n?/g, "\n")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function extractChatSvcReactions(m) {
-  let raw = m.properties?.emotions || m.emotions;
-  if (!raw) return [];
-  if (typeof raw === "string") {
-    try {
-      raw = JSON.parse(raw);
-    } catch {
-      return [];
-    }
-  }
-  if (!Array.isArray(raw)) return [];
-  const reactions = [];
-  for (const entry of raw) {
-    const key = entry?.key;
-    const count = Array.isArray(entry?.users)
-      ? entry.users.length
-      : Number(entry?.count) || 0;
-    if (key && count > 0) {
-      reactions.push({ key, emoji: emojiFromItemId(key), count });
-    }
-  }
-  return reactions;
-}
-
-function extractChatSvcMentions(m) {
-  let raw = m.properties?.mentions || m.mentions;
-  if (!raw) return [];
-  if (typeof raw === "string") {
-    try {
-      raw = JSON.parse(raw);
-    } catch {
-      return [];
-    }
-  }
-  if (!Array.isArray(raw)) return [];
-  const tokens = [];
-  for (const entry of raw) {
-    const id = normalizeAuthorId(entry?.mri || entry?.id || entry?.userId);
-    if (!id) continue;
-    const name = entry?.displayName?.trim() || entry?.name?.trim() || null;
-    tokens.push({ id, name });
-  }
-  return mergeMentionTokens(tokens);
+function coreServicesFromWindow() {
+  return globalThis.window?.teamsForLinuxReactHandler?._getTeams2CoreServices?.();
 }
 
 function togglePauseSync() {
@@ -2456,6 +1716,29 @@ function cancelSync() {
     const r = resumeWaiter;
     resumeWaiter = null;
     r();
+  }
+}
+
+async function waitForWorkerAttachments(modeLabel) {
+  let done = false;
+  const drainPromise = new Promise((resolve) => {
+    drainWaiter = () => {
+      done = true;
+      resolve();
+    };
+  });
+  try {
+    ipcRenderer.send("teams-logger-db", { type: "drain-attachments" });
+  } catch {
+    return;
+  }
+  while (!done && !syncCancelled) {
+    if (remainingWorkerAttachments > 0) {
+      showSyncStatus(
+        `${modeLabel}: downloading attachments (${remainingWorkerAttachments} remaining)...`
+      );
+    }
+    await Promise.race([drainPromise, sleep(250)]);
   }
 }
 
@@ -2589,436 +1872,76 @@ async function chatSvcFetchJson(coreServices, url) {
   throw new Error(`Rate limit exceeded for ${url}`);
 }
 
-const attachmentCacheByKey = new Map();
-const inFlightAttachmentKeys = new Set();
-const attachmentDownloadQueue = [];
-let activeAttachmentWorkers = 0;
+let lastTokenRefreshMs = 0;
+const cachedSharePointTokens = new Map();
 
-function parseContentDispositionFilename(header) {
-  if (!header || typeof header !== "string") return "";
-  const utf8Match = header.match(/filename\*\s*=\s*UTF-8''([^;\r\n]+)/i);
-  if (utf8Match?.[1]) {
-    try {
-      return decodeURIComponent(utf8Match[1].trim());
-    } catch {
-      return utf8Match[1].trim();
+function collectSharePointOrigins(rawFilesList) {
+  const origins = new Set();
+  for (let raw of rawFilesList) {
+    if (!raw) continue;
+    if (typeof raw === "string") {
+      try {
+        raw = JSON.parse(raw);
+      } catch {
+        continue;
+      }
     }
-  }
-  const plainMatch = header.match(/filename\s*=\s*(?:"([^"]+)"|([^;\r\n]+))/i);
-  const raw = plainMatch?.[1] ?? plainMatch?.[2] ?? "";
-  return raw.trim();
-}
-
-function encodeShareUrlToken(targetUrl) {
-  const b64 = Buffer.from(targetUrl, "utf8")
-    .toString("base64")
-    .replace(/=+$/, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
-  return `u!${b64}`;
-}
-
-async function fetchResponseAsAttachment(res, expectedExt = "") {
-  if (!res?.ok) return null;
-  const contentType = res.headers?.get?.("content-type") || "";
-  const mime = contentType.split(";")[0].trim().toLowerCase();
-  if (
-    mime === "text/html" &&
-    expectedExt !== "html" &&
-    expectedExt !== "htm"
-  ) {
-    return null;
-  }
-  const ab = await res.arrayBuffer();
-  if (!ab || ab.byteLength === 0) return null;
-  return {
-    buffer: Buffer.from(ab),
-    contentType,
-    dispositionName: parseContentDispositionFilename(
-      res.headers?.get?.("content-disposition") || ""
-    ),
-  };
-}
-
-async function downloadAmsAttachment(coreServices, url, expectedExt = "") {
-  const amsId = extractAmsObjectId(url);
-  if (amsId && typeof document !== "undefined") {
-    for (const img of document.querySelectorAll("img")) {
-      const id = img.getAttribute("id") || img.getAttribute("itemid") || "";
-      const orig = img.getAttribute("data-orig-src") || "";
-      const cur = img.currentSrc || img.getAttribute("src") || "";
-      if (
-        (id === amsId || orig.includes(amsId) || cur.includes(amsId)) &&
-        cur.startsWith("blob:")
-      ) {
+    if (!Array.isArray(raw)) continue;
+    for (const f of raw) {
+      const fi = f?.fileInfo;
+      for (const u of [
+        fi?.fileUrl,
+        f?.fileUrl,
+        f?.objectUrl,
+        fi?.shareUrl,
+        f?.shareUrl,
+        fi?.siteUrl,
+        f?.baseUrl,
+      ]) {
+        if (!u || typeof u !== "string") continue;
         try {
-          const res = await nativeFetch(cur);
-          const out = await fetchResponseAsAttachment(res, expectedExt);
-          if (out) return out;
+          const origin = new URL(u).origin;
+          if (origin.includes(".sharepoint.com")) origins.add(origin);
         } catch {
-          // continue to network fetch
+          // ignore invalid URL
         }
       }
     }
   }
-
-  const candidates = [url];
-  if (/\/views\/imgo$/i.test(url)) {
-    candidates.push(
-      url.replace(/\/views\/imgo$/i, "/views/imgpsh_fullsize_anim"),
-      url.replace(/\/views\/imgo$/i, "/views/imgpsh_fullsize"),
-      url.replace(/\/views\/imgo$/i, "/views/original")
-    );
-  } else if (/\/views\/original$/i.test(url)) {
-    candidates.push(url.replace(/\/views\/original$/i, "/views/imgo"));
-  }
-
-  for (const candidate of candidates) {
-    try {
-      const headers = await buildChatSvcHeaders(coreServices, candidate);
-      const res = await nativeFetch(candidate, {
-        headers,
-        credentials: "include",
-      });
-      if (res.status === 429) {
-        const retryAfter = Number(res.headers.get("retry-after")) || 3;
-        await sleep(retryAfter * 1000);
-      }
-      const out = await fetchResponseAsAttachment(res, expectedExt);
-      if (out) return out;
-    } catch {
-      // try fallback
-    }
-    if (coreServices?.authenticationResources?.skypeTokenAuthResource) {
-      try {
-        const authRes =
-          await coreServices.authenticationResources.skypeTokenAuthResource({
-            url: candidate,
-            method: "GET",
-            headers: {},
-            authOptions: { source: "mfeService" },
-          });
-        if (authRes?.request?.headers) {
-          const res = await nativeFetch(candidate, {
-            headers: authRes.request.headers,
-            credentials: "include",
-          });
-          const out = await fetchResponseAsAttachment(res, expectedExt);
-          if (out) return out;
-        }
-      } catch {
-        // try fallback
-      }
-    }
-    try {
-      const handler = globalThis.window?.teamsForLinuxReactHandler;
-      const spaceToken = await handler?.acquireToken?.(
-        "https://api.spaces.skype.com"
-      );
-      if (spaceToken?.token) {
-        const res = await nativeFetch(candidate, {
-          headers: { Authorization: `Bearer ${spaceToken.token}` },
-          credentials: "include",
-        });
-        const out = await fetchResponseAsAttachment(res, expectedExt);
-        if (out) return out;
-      }
-    } catch {
-      // try fallback
-    }
-    try {
-      const res = await nativeFetch(candidate, { credentials: "include" });
-      const out = await fetchResponseAsAttachment(res, expectedExt);
-      if (out) return out;
-    } catch {
-      // try next candidate
-    }
-  }
-  return null;
+  return [...origins];
 }
 
-async function downloadSharePointOrDirectAttachment(
-  coreServices,
-  att,
-  expectedExt = ""
-) {
+async function refreshAuthTokensForWorker(coreServices, rawFilesList = []) {
   const handler = globalThis.window?.teamsForLinuxReactHandler;
-  const primaryUrl = att.url || att.shareUrl || null;
-  let origin = null;
-  try {
-    if (primaryUrl) origin = new URL(primaryUrl).origin;
-    else if (att.siteUrl) origin = new URL(att.siteUrl).origin;
-  } catch {
-    origin = null;
-  }
-
-  let spHeaders = {};
-  if (origin && origin.includes(".sharepoint.com")) {
-    try {
-      const tokenRes = await handler?.acquireToken?.(origin);
-      if (tokenRes?.token) {
-        spHeaders = { Authorization: `Bearer ${tokenRes.token}` };
-      }
-    } catch {
-      // best-effort token acquisition
-    }
-
-    for (const u of [att.url, att.shareUrl].filter(Boolean)) {
-      try {
-        const shareApiUrl = `${origin}/_api/v2.0/shares/${encodeShareUrlToken(u)}/driveItem/content`;
-        const res = await nativeFetch(shareApiUrl, {
-          headers: spHeaders,
-          credentials: "include",
-        });
-        const out = await fetchResponseAsAttachment(res, expectedExt);
-        if (out) return out;
-      } catch {
-        // try next strategy
-      }
-    }
-
-    if (att.siteUrl && att.serverRelativeUrl) {
-      try {
-        const siteBase = att.siteUrl.replace(/\/+$/, "");
-        const relPath = att.serverRelativeUrl.replace(/'/g, "''");
-        const apiUrl = `${siteBase}/_api/web/GetFileByServerRelativePath(decodedurl='${encodeURIComponent(relPath)}')/$value`;
-        const res = await nativeFetch(apiUrl, {
-          headers: spHeaders,
-          credentials: "include",
-        });
-        const out = await fetchResponseAsAttachment(res, expectedExt);
-        if (out) return out;
-      } catch {
-        // try next strategy
-      }
-    }
-
-    for (const u of [att.url, att.shareUrl].filter(Boolean)) {
-      try {
-        const graphToken = await handler?.acquireToken?.(
-          "https://graph.microsoft.com"
-        );
-        if (graphToken?.token) {
-          const graphUrl = `https://graph.microsoft.com/v1.0/shares/${encodeShareUrlToken(u)}/driveItem/content`;
-          const res = await nativeFetch(graphUrl, {
-            headers: { Authorization: `Bearer ${graphToken.token}` },
-          });
-          const out = await fetchResponseAsAttachment(res, expectedExt);
-          if (out) return out;
-        }
-      } catch {
-        // try direct fetch
-      }
-    }
-  }
-
-  if (primaryUrl) {
-    try {
-      const res = await nativeFetch(primaryUrl, {
-        headers: spHeaders,
-        credentials: "include",
-      });
-      const out = await fetchResponseAsAttachment(res, expectedExt);
-      if (out) return out;
-    } catch {
-      // ignore
-    }
-    try {
-      const headers = await buildChatSvcHeaders(coreServices, primaryUrl);
-      const res = await nativeFetch(primaryUrl, {
-        headers,
-        credentials: "include",
-      });
-      const out = await fetchResponseAsAttachment(res, expectedExt);
-      if (out) return out;
-    } catch {
-      // ignore
-    }
-  }
-
-  return null;
-}
-
-async function downloadAndArchiveAttachment(att) {
-  const expectedExt = cleanExtension(
-    att.extension || extractFilenameExtension(att.filename)
-  );
-  let downloaded = null;
-
-  if (att.blobUrl) {
-    try {
-      const res = await nativeFetch(att.blobUrl);
-      downloaded = await fetchResponseAsAttachment(res, expectedExt);
-    } catch {
-      downloaded = null;
-    }
-  }
-
-  if (!downloaded && att.url) {
-    const coreServices =
-      globalThis.window?.teamsForLinuxReactHandler?._getTeams2CoreServices?.();
-    if (isAmsOrMediaUrl(att.url)) {
-      downloaded = await downloadAmsAttachment(
-        coreServices,
-        att.url,
-        expectedExt
-      );
-    } else {
-      downloaded = await downloadSharePointOrDirectAttachment(
-        coreServices,
-        att,
-        expectedExt
-      );
-    }
-  }
-
-  if (!downloaded?.buffer) return null;
-
-  const rawName =
-    att.filename && !att.filename.startsWith("image.")
-      ? att.filename
-      : downloaded.dispositionName || att.filename || "";
-  const ext =
-    extractFilenameExtension(rawName) ||
-    expectedExt ||
-    detectBufferExtension(downloaded.buffer) ||
-    extensionFromContentType(downloaded.contentType) ||
-    "bin";
-  const filename =
-    sanitizeAttachmentFilename(rawName, ext) ||
-    (att.isInlineImage ? `image.${ext}` : `attachment.${ext}`);
-
-  try {
-    const saved = await saveAttachmentBuffer(downloaded.buffer, ext);
-    return {
-      filename,
-      checksum: saved.checksum,
-      extension: saved.extension,
-      dataBase64: null,
-    };
-  } catch {
-    const checksum = crypto
-      .createHash("sha256")
-      .update(downloaded.buffer)
-      .digest("hex");
-    return {
-      filename,
-      checksum,
-      extension: ext,
-      dataBase64: downloaded.buffer.toString("base64"),
-    };
-  }
-}
-
-function recordMessageAttachment(messageId, entry) {
-  if (!messageId || !entry?.checksum) return;
-  let list = archivedAttachmentsByMid.get(messageId);
-  if (!list) {
-    list = [];
-    archivedAttachmentsByMid.set(messageId, list);
-  }
-  const existing = list.find((x) => x.checksum === entry.checksum);
-  if (existing) {
-    if (
-      entry.filename &&
-      (!existing.filename || existing.filename.startsWith("image."))
-    ) {
-      existing.filename = entry.filename;
-    }
-  } else {
-    list.push({
-      filename: entry.filename || "",
-      checksum: entry.checksum,
-      extension: entry.extension || "",
-    });
-  }
-  pendingAttachments.set(`${messageId}:${entry.checksum}`, {
-    messageId,
-    filename: entry.filename || "",
-    checksum: entry.checksum,
-    extension: entry.extension || "",
-    dataBase64: entry.dataBase64 || null,
-  });
-  scheduleDbFlush();
-}
-
-function hasValidArchivedAttachments(messageId, count) {
-  const existing = archivedAttachmentsByMid.get(messageId);
-  if (!existing || existing.length < count) return false;
-  return existing.every((a) =>
-    fs.existsSync(getAttachmentDiskPath(a.checksum, a.extension))
-  );
-}
-
-function queueAttachmentDownloads(messageId, attachments) {
-  if (!messageId || !Array.isArray(attachments) || attachments.length === 0) {
+  if (!handler?.acquireToken) return;
+  const origins = collectSharePointOrigins(rawFilesList);
+  const newOrigins = origins.filter((o) => !cachedSharePointTokens.has(o));
+  const now = Date.now();
+  if (now - lastTokenRefreshMs < 120000 && newOrigins.length === 0) {
     return;
   }
-  if (hasValidArchivedAttachments(messageId, attachments.length)) {
-    return;
-  }
+  lastTokenRefreshMs = now;
 
-  for (const att of attachments) {
-    if (!att?.key) continue;
-    const cached = attachmentCacheByKey.get(att.key);
-    if (
-      cached &&
-      fs.existsSync(getAttachmentDiskPath(cached.checksum, cached.extension))
-    ) {
-      const filename =
-        sanitizeAttachmentFilename(att.filename, cached.extension) ||
-        cached.filename;
-      recordMessageAttachment(messageId, { ...cached, filename });
-      continue;
-    }
-
-    const taskKey = `${messageId}:${att.key}`;
-    if (inFlightAttachmentKeys.has(taskKey)) continue;
-    inFlightAttachmentKeys.add(taskKey);
-    attachmentDownloadQueue.push({ messageId, att, taskKey });
-  }
-
-  void processAttachmentQueue();
-}
-
-async function processAttachmentQueue() {
-  if (activeAttachmentWorkers >= 2) return;
-  activeAttachmentWorkers++;
   try {
-    while (attachmentDownloadQueue.length > 0) {
-      const task = attachmentDownloadQueue.shift();
-      if (!task) break;
-      try {
-        const cached = attachmentCacheByKey.get(task.att.key);
-        if (
-          cached &&
-          fs.existsSync(getAttachmentDiskPath(cached.checksum, cached.extension))
-        ) {
-          const filename =
-            sanitizeAttachmentFilename(task.att.filename, cached.extension) ||
-            cached.filename;
-          recordMessageAttachment(task.messageId, { ...cached, filename });
-          continue;
-        }
-        const entry = await downloadAndArchiveAttachment(task.att);
-        if (entry) {
-          attachmentCacheByKey.set(task.att.key, entry);
-          recordMessageAttachment(task.messageId, entry);
-        }
-      } catch (err) {
-        console.warn(
-          "[message-logger] attachment download error:",
-          err.message
-        );
-      } finally {
-        inFlightAttachmentKeys.delete(task.taskKey);
-      }
+    const [ic3, spaces, graph] = await Promise.all([
+      handler.acquireToken("https://ic3.teams.office.com").catch(() => null),
+      handler.acquireToken("https://api.spaces.skype.com").catch(() => null),
+      handler.acquireToken("https://graph.microsoft.com").catch(() => null),
+    ]);
+    for (const origin of origins) {
+      const sp = await handler.acquireToken(origin).catch(() => null);
+      if (sp?.token) cachedSharePointTokens.set(origin, sp.token);
     }
-  } finally {
-    activeAttachmentWorkers--;
-    if (attachmentDownloadQueue.length > 0) {
-      void processAttachmentQueue();
-    }
+    pendingTokens = {
+      ic3Token: ic3?.token || "",
+      spacesToken: spaces?.token || "",
+      skypeToken: coreServices?.authenticationUser?.skypeToken || "",
+      graphToken: graph?.token || "",
+      sharePointTokens: Object.fromEntries(cachedSharePointTokens),
+    };
+    scheduleDbFlush();
+  } catch {
+    // best-effort token refresh
   }
 }
 
@@ -3117,10 +2040,20 @@ function harvestAuthorsFromMessages(convMessages, convMembers = []) {
     if (fromId && disp) {
       upsertAuthor.run(fromId, disp);
     }
-    for (const men of extractChatSvcMentions(m)) {
-      if (isPersonMri(men.id)) {
-        seenMris.add(men.id);
-        if (men.name) upsertAuthor.run(men.id, men.name);
+    let rawMentions = m.properties?.mentions || m.mentions;
+    if (typeof rawMentions === "string") {
+      try {
+        rawMentions = JSON.parse(rawMentions);
+      } catch {
+        rawMentions = null;
+      }
+    }
+    if (Array.isArray(rawMentions)) {
+      for (const entry of rawMentions) {
+        const menId = trackMri(entry?.mri || entry?.id || entry?.userId);
+        const menName =
+          entry?.displayName?.trim() || entry?.name?.trim() || null;
+        if (menId && menName) upsertAuthor.run(menId, menName);
       }
     }
 
@@ -3143,7 +2076,9 @@ function harvestAuthorsFromMessages(convMessages, convMembers = []) {
         }
       }
       if (/<topicupdate\b/i.test(text)) {
-        const val = htmlToText(text.match(/<value>([\s\S]*?)<\/value>/i)?.[1] || "");
+        const val = (text.match(/<value>([\s\S]*?)<\/value>/i)?.[1] || "")
+          .replace(/<[^>]+>/g, "")
+          .trim();
         latestTopicUpdate = normalizeChannelName(val);
       }
     } else if (text.startsWith("{")) {
@@ -3511,6 +2446,11 @@ async function syncSingleConversation(
 
   upsertChannel.run(channelId, channelName, channelType, teamName);
 
+  await refreshAuthTokensForWorker(
+    coreServices,
+    convMessages.map((m) => m.properties?.files ?? m.files)
+  );
+
   let lastAuthor = null;
   let newestMsgMs = 0;
   let savedCount = 0;
@@ -3551,9 +2491,11 @@ async function syncSingleConversation(
       const msgType = m.messagetype || "";
       const isRichOrText =
         msgType.startsWith("RichText") || msgType === "Text";
-      const attachments = extractChatSvcAttachments(m);
-      const isUserMsg =
-        isRichOrText || Boolean(subject) || attachments.length > 0;
+      const rawFiles = m.properties?.files ?? m.files ?? null;
+      const hasAttachment = Boolean(
+        rawFiles || /<(?:img|URIObject)\b/i.test(m.content || "")
+      );
+      const isUserMsg = isRichOrText || Boolean(subject) || hasAttachment;
       const fromId = normalizeAuthorId(m.from);
 
       let direction = "received";
@@ -3586,15 +2528,6 @@ async function syncSingleConversation(
         }
       }
 
-      const body = !isRichOrText
-        ? formatEventContent(m.content, msgType)
-        : htmlToText(m.content);
-      const content =
-        subject && body && body !== subject
-          ? `${subject}\n${body}`
-          : subject || body;
-      const reactions = extractChatSvcReactions(m);
-      const mentions = extractChatSvcMentions(m);
       storeRecord({
         id,
         threadId,
@@ -3605,13 +2538,16 @@ async function syncSingleConversation(
         direction,
         authorId,
         authorName,
-        content,
-        reactions,
-        mentions,
+        content: "",
+        rawContent: typeof m.content === "string" ? m.content : "",
+        subject,
+        messageType: msgType,
+        rawEmotions: m.properties?.emotions ?? m.emotions ?? null,
+        rawMentions: m.properties?.mentions ?? m.mentions ?? null,
+        rawFiles,
+        reactions: null,
+        mentions: null,
       });
-      if (attachments.length > 0) {
-        queueAttachmentDownloads(id, attachments);
-      }
       savedCount++;
     }
     if (
@@ -3745,19 +2681,8 @@ async function runFullArchiveSync(
       totalMessages += saved;
     }
 
-    while (
-      attachmentDownloadQueue.length > 0 ||
-      activeAttachmentWorkers > 0
-    ) {
-      await waitIfPausedOrCancelled();
-      const remaining =
-        attachmentDownloadQueue.length + activeAttachmentWorkers;
-      showSyncStatus(
-        `${modeLabel}: downloading attachments (${remaining} remaining)...`
-      );
-      await sleep(250);
-    }
     flushToDbWorker();
+    await waitForWorkerAttachments(modeLabel);
 
     showSyncStatus(
       `${modeLabel} complete: ${totalMessages} messages across ${conversations.length} conversations`,

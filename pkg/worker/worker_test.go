@@ -48,6 +48,28 @@ func TestWorkerRunAndFlush(t *testing.T) {
 	require.Equal(t, os.FileMode(0o400), info.Mode().Perm())
 }
 
+func TestWorkerFormatAndAttachmentExtraction(t *testing.T) {
+	html := `<p>Hello <span itemtype="http://schema.skype.com/Mention">Alice</span></p>` +
+		`<pre class="language-go">fmt.Println(&quot;hi&quot;)</pre>` +
+		`<img itemtype="http://schema.skype.com/AMSImage" id="0-weu-d1-abc123" src="https://eu-api.asm.skype.com/v1/objects/0-weu-d1-abc123/views/imgo" alt="image">`
+
+	text := HTMLToText(html)
+	require.Contains(t, text, "Hello Alice")
+	require.Contains(t, text, "```go\nfmt.Println(\"hi\")\n```")
+	require.NotContains(t, text, "0-weu-d1-abc123")
+
+	filesJSON := `[{"fileName":"report.pdf","fileType":"pdf","objectUrl":"https://tenant.sharepoint.com/sites/Team/Shared%20Documents/report.pdf"}]`
+	atts := ExtractChatSvcAttachments(html, filesJSON)
+	require.Len(t, atts, 2)
+	require.Equal(t, "report.pdf", atts[0].Filename)
+	require.Equal(t, "pdf", atts[0].Extension)
+	require.Equal(t, "ams:0-weu-d1-abc123", atts[1].Key)
+	require.True(t, atts[1].IsInlineImage)
+
+	require.Equal(t, "png", DetectBufferExtension([]byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}))
+	require.Equal(t, "pdf", DetectBufferExtension([]byte("%PDF-1.7")))
+}
+
 func sampleFlushPayload() RequestMessage {
 	chanID := "19:group1@thread.v2"
 	chanType := "group chat"

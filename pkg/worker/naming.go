@@ -167,7 +167,7 @@ func resolvePersonName(tx *gorm.DB, rawID, fallback string) string {
 			return fallback
 		}
 
-		return "app"
+		return personApp
 	}
 
 	if strings.HasPrefix(id, "28:") {
@@ -175,7 +175,7 @@ func resolvePersonName(tx *gorm.DB, rawID, fallback string) string {
 			return fallback
 		}
 
-		return "bot"
+		return personBot
 	}
 
 	var name string
@@ -272,7 +272,7 @@ func isIgnoredParticipant(name, myName string) bool {
 	}
 
 	switch name {
-	case "bot", "app", "Polls", "Everyone", "Conference Virtual Assistant":
+	case personBot, personApp, "Polls", "Everyone", "Conference Virtual Assistant":
 		return true
 	}
 
@@ -312,7 +312,7 @@ func computeGroupChatNameFromDB(tx *gorm.DB, channelID string, me *UserInfo) str
 }
 
 func (t *participantTracker) processRow(r namingMessageRow) {
-	if r.Direction != "event" {
+	if r.Direction != directionEvent {
 		if r.AuthorID != "" && (t.myID == "" || r.AuthorID != t.myID) {
 			author := r.AuthorName
 			if author == "" {

@@ -10,9 +10,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/glebarez/sqlite"
@@ -24,6 +27,15 @@ const (
 	maxScannerTokenSize = 64 * 1024 * 1024
 	attachmentFileMode  = 0o400
 	archiveDirMode      = 0o755
+
+	directionEvent      = "event"
+	personApp           = "app"
+	personBot           = "bot"
+	extJPG              = "jpg"
+	extGIF              = "gif"
+	extZIP              = "zip"
+	headerAuthorization = "Authorization"
+	msgKeyType          = "type"
 )
 
 const schemaSQL = `
@@ -85,10 +97,31 @@ CREATE INDEX IF NOT EXISTS idx_channels_name ON channels(name);
 CREATE INDEX IF NOT EXISTS idx_messages_channel_id ON messages(channel_id, id DESC);
 `
 
+type AuthTokens struct {
+	IC3Token         string            `json:"ic3Token"`
+	SpacesToken      string            `json:"spacesToken"`
+	SkypeToken       string            `json:"skypeToken"`
+	GraphToken       string            `json:"graphToken"`
+	SharePointTokens map[string]string `json:"sharePointTokens"`
+}
+
+type attachmentJob struct {
+	messageID int64
+	desc      AttachmentDescriptor
+}
+
 type Worker struct {
-	db  *gorm.DB
-	dir string
-	out io.Writer
+	db          *gorm.DB
+	dir         string
+	out         io.Writer
+	writeMu     sync.Mutex
+	dbMu        sync.Mutex
+	tokensMu    sync.RWMutex
+	tokens      AuthTokens
+	attCache    sync.Map
+	inFlight    sync.Map
+	pendingJobs atomic.Int64
+	jobCh       chan attachmentJob
 }
 
 type AuthorPayload struct {
@@ -123,20 +156,27 @@ type AttachmentPayload struct {
 }
 
 type RecordPayload struct {
-	ID               int64               `json:"id"`
-	ThreadID         *int64              `json:"threadId"`
-	ChannelID        *string             `json:"channelId"`
-	ChannelName      *string             `json:"channelName"`
-	TeamName         *string             `json:"teamName"`
-	ChannelType      *string             `json:"channelType"`
-	Direction        string              `json:"direction"`
-	AuthorID         *string             `json:"authorId"`
-	AuthorName       *string             `json:"authorName"`
-	Content          string              `json:"content"`
-	ReactionsSummary *string             `json:"reactionsSummary"`
-	Reactions        []ReactionPayload   `json:"reactions"`
-	Mentions         []MentionPayload    `json:"mentions"`
-	Attachments      []AttachmentPayload `json:"attachments"`
+	ID               int64                  `json:"id"`
+	ThreadID         *int64                 `json:"threadId"`
+	ChannelID        *string                `json:"channelId"`
+	ChannelName      *string                `json:"channelName"`
+	TeamName         *string                `json:"teamName"`
+	ChannelType      *string                `json:"channelType"`
+	Direction        string                 `json:"direction"`
+	AuthorID         *string                `json:"authorId"`
+	AuthorName       *string                `json:"authorName"`
+	Content          string                 `json:"content"`
+	RawContent       string                 `json:"rawContent"`
+	Subject          string                 `json:"subject"`
+	MessageType      string                 `json:"messageType"`
+	RawEmotions      any                    `json:"rawEmotions"`
+	RawMentions      any                    `json:"rawMentions"`
+	RawFiles         any                    `json:"rawFiles"`
+	ReactionsSummary *string                `json:"reactionsSummary"`
+	Reactions        []ReactionPayload      `json:"reactions"`
+	Mentions         []MentionPayload       `json:"mentions"`
+	Attachments      []AttachmentPayload    `json:"attachments"`
+	AttachmentTasks  []AttachmentDescriptor `json:"attachmentTasks"`
 }
 
 type LastSyncPayload struct {
@@ -156,6 +196,7 @@ type GroupNameRequest struct {
 
 type RequestMessage struct {
 	Type              string              `json:"type"`
+	Tokens            *AuthTokens         `json:"tokens"`
 	Authors           []AuthorPayload     `json:"authors"`
 	Channels          []ChannelPayload    `json:"channels"`
 	Records           []RecordPayload     `json:"records"`
@@ -202,7 +243,7 @@ type GroupNamesResponse struct {
 	Updates []GroupNameUpdate `json:"updates"`
 }
 
-func New(dbPath string, out io.Writer) (*Worker, error) {
+func New(ctx context.Context, dbPath string, out io.Writer) (*Worker, error) {
 	dir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dir, archiveDirMode); err != nil {
 		return nil, fmt.Errorf("create archive dir: %w", err)
@@ -222,15 +263,76 @@ func New(dbPath string, out io.Writer) (*Worker, error) {
 	_ = db.Exec("ALTER TABLE channels ADD COLUMN last_sync TIMESTAMP").Error
 	_ = db.Exec("ALTER TABLE channels ADD COLUMN team_name TEXT").Error
 
-	return &Worker{
-		db:  db,
-		dir: dir,
-		out: out,
-	}, nil
+	w := &Worker{ //nolint:exhaustruct_v5
+		db:    db,
+		dir:   dir,
+		out:   out,
+		jobCh: make(chan attachmentJob, 4096),
+	}
+
+	for range 2 {
+		go w.attachmentWorkerLoop(ctx)
+	}
+
+	return w, nil
+}
+
+func (w *Worker) updateTokens(tok *AuthTokens) {
+	if tok == nil {
+		return
+	}
+
+	w.tokensMu.Lock()
+
+	if tok.IC3Token != "" {
+		w.tokens.IC3Token = tok.IC3Token
+	}
+
+	if tok.SpacesToken != "" {
+		w.tokens.SpacesToken = tok.SpacesToken
+	}
+
+	if tok.SkypeToken != "" {
+		w.tokens.SkypeToken = tok.SkypeToken
+	}
+
+	if tok.GraphToken != "" {
+		w.tokens.GraphToken = tok.GraphToken
+	}
+
+	if len(tok.SharePointTokens) > 0 {
+		if w.tokens.SharePointTokens == nil {
+			w.tokens.SharePointTokens = make(map[string]string, len(tok.SharePointTokens))
+		}
+
+		for k, v := range tok.SharePointTokens {
+			if v != "" {
+				w.tokens.SharePointTokens[k] = v
+			}
+		}
+	}
+
+	w.tokensMu.Unlock()
+}
+
+func (w *Worker) currentTokens() AuthTokens {
+	w.tokensMu.RLock()
+	defer w.tokensMu.RUnlock()
+
+	sp := make(map[string]string, len(w.tokens.SharePointTokens))
+	maps.Copy(sp, w.tokens.SharePointTokens)
+
+	return AuthTokens{
+		IC3Token:         w.tokens.IC3Token,
+		SpacesToken:      w.tokens.SpacesToken,
+		SkypeToken:       w.tokens.SkypeToken,
+		GraphToken:       w.tokens.GraphToken,
+		SharePointTokens: sp,
+	}
 }
 
 func Run(ctx context.Context, dbPath string, in io.Reader, out io.Writer) error {
-	w, err := New(dbPath, out)
+	w, err := New(ctx, dbPath, out)
 	if err != nil {
 		return err
 	}
@@ -254,6 +356,10 @@ func Run(ctx context.Context, dbPath string, in io.Reader, out io.Writer) error 
 			continue
 		}
 
+		if msg.Tokens != nil {
+			w.updateTokens(msg.Tokens)
+		}
+
 		switch msg.Type {
 		case "request-init":
 			if err := w.SendInitSnapshot(ctx); err != nil {
@@ -263,8 +369,12 @@ func Run(ctx context.Context, dbPath string, in io.Reader, out io.Writer) error 
 			if err := w.HandleFlush(ctx, msg); err != nil {
 				continue
 			}
+		case "drain-attachments":
+			w.drainAttachments()
 		}
 	}
+
+	w.waitForAttachmentJobs()
 
 	return scanner.Err()
 }
@@ -316,6 +426,8 @@ func (w *Worker) SendInitSnapshot(ctx context.Context) error {
 func (w *Worker) HandleFlush(ctx context.Context, msg RequestMessage) error {
 	var updates []GroupNameUpdate
 
+	w.dbMu.Lock()
+
 	err := w.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var txErr error
 
@@ -323,11 +435,15 @@ func (w *Worker) HandleFlush(ctx context.Context, msg RequestMessage) error {
 
 		return txErr
 	})
+	if err == nil {
+		_ = w.db.WithContext(ctx).Exec("PRAGMA wal_checkpoint(PASSIVE)").Error
+	}
+
+	w.dbMu.Unlock()
+
 	if err != nil {
 		return err
 	}
-
-	_ = w.db.WithContext(ctx).Exec("PRAGMA wal_checkpoint(PASSIVE)").Error
 
 	if len(updates) > 0 && w.out != nil {
 		return w.writeJSON(GroupNamesResponse{
@@ -392,6 +508,8 @@ func (w *Worker) flushAuthorsAndChannels(tx *gorm.DB, authors []AuthorPayload, c
 }
 
 func (w *Worker) flushRecord(tx *gorm.DB, rec RecordPayload) error {
+	tasks := w.prepareRecord(tx, &rec)
+
 	if rec.ChannelID != nil && *rec.ChannelID != "" {
 		if _, err := upsertChannel(tx, *rec.ChannelID, rec.ChannelName, rec.ChannelType, rec.TeamName); err != nil {
 			return err
@@ -423,7 +541,190 @@ func (w *Worker) flushRecord(tx *gorm.DB, rec RecordPayload) error {
 		}
 	}
 
+	w.queueAttachmentTasks(rec.ID, tasks)
+
 	return nil
+}
+
+func (w *Worker) prepareRecord(tx *gorm.DB, rec *RecordPayload) []AttachmentDescriptor {
+	if len(rec.Reactions) == 0 && rec.RawEmotions != nil {
+		rec.Reactions = ExtractChatSvcReactions(rec.RawEmotions)
+	}
+
+	if rec.ReactionsSummary == nil && len(rec.Reactions) > 0 {
+		rec.ReactionsSummary = FormatReactionsSummary(rec.Reactions)
+	}
+
+	if len(rec.Mentions) == 0 && rec.RawMentions != nil {
+		rec.Mentions = ExtractChatSvcMentions(rec.RawMentions)
+	}
+
+	resolveRecordContent(tx, rec)
+
+	extracted := ExtractChatSvcAttachments(rec.RawContent, rec.RawFiles)
+
+	return mergeAttachmentDescriptors(append(extracted, rec.AttachmentTasks...))
+}
+
+func resolveRecordContent(tx *gorm.DB, rec *RecordPayload) {
+	if rec.Content != "" {
+		if rec.Direction == directionEvent {
+			rec.Content = FormatEventContent(tx, rec.Content, rec.MessageType)
+		}
+
+		return
+	}
+
+	if rec.RawContent == "" && rec.Subject == "" {
+		return
+	}
+
+	isRichOrText := strings.HasPrefix(rec.MessageType, "RichText") || rec.MessageType == "Text" || rec.MessageType == ""
+
+	var body string
+
+	if !isRichOrText || rec.Direction == directionEvent {
+		body = FormatEventContent(tx, rec.RawContent, rec.MessageType)
+	} else {
+		body = HTMLToText(rec.RawContent)
+	}
+
+	subj := strings.TrimSpace(strings.ReplaceAll(rec.Subject, "\r\n", "\n"))
+	switch {
+	case subj != "" && body != "" && body != subj:
+		rec.Content = subj + "\n" + body
+	case subj != "":
+		rec.Content = subj
+	default:
+		rec.Content = body
+	}
+}
+
+func (w *Worker) queueAttachmentTasks(messageID int64, tasks []AttachmentDescriptor) {
+	if messageID == 0 || len(tasks) == 0 {
+		return
+	}
+
+	if w.hasArchivedAttachments(messageID, len(tasks)) {
+		return
+	}
+
+	for _, desc := range tasks {
+		if desc.Key == "" {
+			continue
+		}
+
+		if cached, ok := w.attCache.Load(desc.Key); ok {
+			if att, ok := cached.(AttachmentPayload); ok {
+				att.MessageID = messageID
+				if desc.Filename != "" && !strings.HasPrefix(desc.Filename, "image.") {
+					att.Filename = desc.Filename
+				}
+
+				w.persistSavedAttachment(att)
+
+				continue
+			}
+		}
+
+		taskKey := fmt.Sprintf("%d:%s", messageID, desc.Key)
+		if _, loaded := w.inFlight.LoadOrStore(taskKey, struct{}{}); loaded {
+			continue
+		}
+
+		w.pendingJobs.Add(1)
+
+		w.jobCh <- attachmentJob{messageID: messageID, desc: desc}
+	}
+}
+
+func (w *Worker) attachmentWorkerLoop(ctx context.Context) {
+	for job := range w.jobCh {
+		w.processAttachmentJob(ctx, job)
+	}
+}
+
+func (w *Worker) processAttachmentJob(ctx context.Context, job attachmentJob) {
+	taskKey := fmt.Sprintf("%d:%s", job.messageID, job.desc.Key)
+
+	defer func() {
+		w.inFlight.Delete(taskKey)
+		w.pendingJobs.Add(-1)
+	}()
+
+	if cached, ok := w.attCache.Load(job.desc.Key); ok {
+		if att, ok := cached.(AttachmentPayload); ok {
+			att.MessageID = job.messageID
+			if job.desc.Filename != "" && !strings.HasPrefix(job.desc.Filename, "image.") {
+				att.Filename = job.desc.Filename
+			}
+
+			w.persistSavedAttachment(att)
+
+			return
+		}
+	}
+
+	if att := w.resolveAndSaveAttachment(ctx, job.messageID, job.desc); att != nil {
+		w.attCache.Store(job.desc.Key, *att)
+		w.persistSavedAttachment(*att)
+	}
+}
+
+func (w *Worker) persistSavedAttachment(att AttachmentPayload) {
+	w.dbMu.Lock()
+
+	err := w.flushAttachment(w.db, att)
+
+	w.dbMu.Unlock()
+
+	if err == nil && w.out != nil {
+		if err := w.writeJSON(map[string]any{
+			msgKeyType: "attachment-saved",
+			"attachment": InitAttachment{
+				MessageID: att.MessageID,
+				Filename:  att.Filename,
+				Checksum:  att.Checksum,
+				Extension: att.Extension,
+			},
+		}); err != nil {
+			return
+		}
+	}
+}
+
+func (w *Worker) waitForAttachmentJobs() {
+	for w.pendingJobs.Load() > 0 {
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func (w *Worker) drainAttachments() {
+	for {
+		rem := w.pendingJobs.Load()
+		if rem <= 0 {
+			break
+		}
+
+		if w.out != nil {
+			if err := w.writeJSON(map[string]any{
+				msgKeyType:  "attachment-progress",
+				"remaining": rem,
+			}); err != nil {
+				break
+			}
+		}
+
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if w.out != nil {
+		if err := w.writeJSON(map[string]any{
+			msgKeyType: "attachments-drained",
+		}); err != nil {
+			return
+		}
+	}
 }
 
 func (w *Worker) flushAttachment(tx *gorm.DB, att AttachmentPayload) error {
@@ -528,6 +829,10 @@ func (w *Worker) writeJSON(v any) error {
 	}
 
 	data = append(data, '\n')
+
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
+
 	_, err = w.out.Write(data)
 
 	return err
