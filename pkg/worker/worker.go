@@ -493,16 +493,12 @@ func (w *Worker) SaveAttachment(buf []byte, rawExt string) (string, string, erro
 	}
 
 	destPath := filepath.Join(w.dir, "attachments", checksum[0:2], checksum[2:4], checksum[4:6], name)
-	if err := os.MkdirAll(filepath.Dir(destPath), archiveDirMode); err != nil {
-		return "", "", err
+	if _, err := os.Stat(destPath); err == nil {
+		return checksum, ext, nil
 	}
 
-	if _, err := os.Stat(destPath); err == nil {
-		if err := os.Chmod(destPath, attachmentFileMode); err != nil {
-			return "", "", err
-		}
-
-		return checksum, ext, nil
+	if err := os.MkdirAll(filepath.Dir(destPath), archiveDirMode); err != nil {
+		return "", "", err
 	}
 
 	tmpPath := fmt.Sprintf("%s.tmp-%d-%d", destPath, os.Getpid(), time.Now().UnixNano())
@@ -510,13 +506,15 @@ func (w *Worker) SaveAttachment(buf []byte, rawExt string) (string, string, erro
 		return "", "", err
 	}
 
-	if err := os.Chmod(tmpPath, attachmentFileMode); err != nil {
+	defer func() {
 		_ = os.Remove(tmpPath)
+	}()
+
+	if err := os.Chmod(tmpPath, attachmentFileMode); err != nil {
 		return "", "", err
 	}
 
-	if err := os.Rename(tmpPath, destPath); err != nil {
-		_ = os.Remove(tmpPath)
+	if err := os.Link(tmpPath, destPath); err != nil && !os.IsExist(err) {
 		return "", "", err
 	}
 

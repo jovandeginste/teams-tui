@@ -148,21 +148,23 @@ async function saveAttachmentBuffer(buf, extension) {
   const checksum = crypto.createHash("sha256").update(buf).digest("hex");
   const ext = cleanExtension(extension);
   const destPath = getAttachmentDiskPath(checksum, ext);
+  if (fs.existsSync(destPath)) {
+    return { checksum, extension: ext, path: destPath };
+  }
   const dir = path.dirname(destPath);
   await fs.promises.mkdir(dir, { recursive: true });
+  const tmpPath = `${destPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await fs.promises.writeFile(tmpPath, buf, { mode: 0o400 });
+  await fs.promises.chmod(tmpPath, 0o400);
   try {
-    await fs.promises.access(destPath, fs.constants.F_OK);
-    try {
-      await fs.promises.chmod(destPath, 0o400);
-    } catch {
-      // ignore chmod error on existing file
+    await fs.promises.link(tmpPath, destPath);
+  } catch (err) {
+    if (err.code !== "EEXIST") {
+      await fs.promises.unlink(tmpPath).catch(() => {});
+      throw err;
     }
-  } catch {
-    const tmpPath = `${destPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    await fs.promises.writeFile(tmpPath, buf, { mode: 0o400 });
-    await fs.promises.chmod(tmpPath, 0o400);
-    await fs.promises.rename(tmpPath, destPath);
   }
+  await fs.promises.unlink(tmpPath).catch(() => {});
   return { checksum, extension: ext, path: destPath };
 }
 
