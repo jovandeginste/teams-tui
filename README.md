@@ -9,7 +9,8 @@ Microsoft Teams history is slow to search and browse inside the Electron client.
 ### Features
 
 - **Automatic & On-Demand Archive Logger (`message-logger.js`)**:
-  - Captures live messages, reactions, mentions, and call/membership events from the Teams DOM and WebSocket/fetch traffic.
+  - Captures live messages, reactions, mentions, attachments, and call/membership events from the Teams DOM and WebSocket/fetch traffic.
+  - Archives images and file attachments by SHA-256 checksum under `~/.local/share/teams-archive/attachments/ab/cd/ef/<checksum>.<ext>` and links them in the `message_attachments` table (`message_id`, `filename`, `checksum`, `extension`).
   - Runs SQLite writes in a dedicated Node worker process (`--db-worker`) in WAL mode so the Teams UI never blocks.
   - Adds an **Archive Sync** application menu (`Sync Current Channel`, `Re-sync`, `Full Sync`, `Pause / Resume`, `Cancel`) and a right-click `Sync channel archive` context menu item inside `teams-for-linux`.
 - **IRC-style TUI (`teams-tui`)**:
@@ -121,6 +122,9 @@ make lint
 
 # Tidy and vendor dependencies
 make deps
+
+# Launch teams-for-linux live-injecting ./message-logger.js from this repo
+make run-teams
 ```
 
 ### Interactive TUI
@@ -145,6 +149,7 @@ teams-tui -d /path/to/teams.db
 - `c` (or `/` in channel pane): Filter channels by name
 - `f` (or `/` in message pane): Search messages in the current channel
 - `s`: Search messages across all channels (filters both channels and messages)
+- `o` (or click an `[attachment: ...]` line): Open attachment with `xdg-open`
 - `esc`: Clear active search filter or return focus to channel list
 - `?`: Toggle keyboard shortcuts overlay popup
 - `q`, `ctrl+c`: Quit

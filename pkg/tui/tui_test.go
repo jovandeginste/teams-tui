@@ -241,3 +241,82 @@ func TestModelNavigationAndScroll(t *testing.T) {
 	require.Equal(t, "c2", m.channelID)
 	require.Contains(t, m.View(), "msg-19")
 }
+
+func TestOpenAttachments(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "teams.db")
+	db, err := gorm.Open(sqlite.Open(path), &gorm.Config{}) //nolint:exhaustruct_v5
+	require.NoError(t, err)
+
+	sum1 := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	sum2 := "1234560123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+	require.NoError(t, db.Exec(`
+		CREATE TABLE authors (id TEXT PRIMARY KEY, name TEXT);
+		CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT, team_name TEXT, type TEXT, last_sync TIMESTAMP);
+		CREATE TABLE messages (id INTEGER PRIMARY KEY, thread_id INTEGER, channel_id TEXT, direction TEXT, author_id TEXT, content TEXT, reactions TEXT, timestamp TIMESTAMP, recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+		CREATE TABLE message_attachments (message_id INTEGER, filename TEXT, checksum TEXT, extension TEXT, PRIMARY KEY (message_id, checksum));
+		INSERT INTO authors VALUES ('8:orgid:00000000-0000-0000-0000-000000000001', 'Alice');
+		INSERT INTO channels (id, name, team_name, type) VALUES ('c1', 'General', 'ICTS', 'channel');
+		INSERT INTO messages (id, channel_id, direction, author_id, content) VALUES
+			(1700000000000, 'c1', 'received', '8:orgid:00000000-0000-0000-0000-000000000001', 'here is file 1'),
+			(1700000010000, 'c1', 'received', '8:orgid:00000000-0000-0000-0000-000000000001', 'here is file 2');
+		INSERT INTO message_attachments (message_id, filename, checksum, extension) VALUES
+			(1700000000000, 'first.png', ?, 'png'),
+			(1700000010000, 'second.pdf', ?, 'pdf');
+	`, sum1, sum2).Error)
+
+	var opened []string
+
+	origOpen := openAttachmentFunc
+	openAttachmentFunc = func(p string) error {
+		opened = append(opened, p)
+		return nil
+	}
+
+	t.Cleanup(func() {
+		openAttachmentFunc = origOpen
+	})
+
+	store, err := archive.Open(path)
+	require.NoError(t, err)
+
+	m := New(store)
+	require.Contains(t, m.View(), "[attachment: first.png]")
+	require.Contains(t, m.View(), "[attachment: second.pdf]")
+
+	// Pressing 'o' with multiple attachments opens the selector popup pre-selected on the latest attachment.
+	m.handleKey("o")
+	require.True(t, m.showAttachments)
+	require.Contains(t, m.View(), "Open Attachment (xdg-open)")
+
+	// Select first attachment ('k') and press 'enter'
+	m.handleAttachmentKey("k")
+	m.handleAttachmentKey("enter")
+	require.False(t, m.showAttachments)
+	require.Equal(t, []string{filepath.Join(dir, "attachments", "ab", "cd", "ef", sum1+".png")}, opened)
+}
+
+func TestWrappedHyperlinkPreservesFullURL(t *testing.T) {
+	fullURL := "https://example.com/very/long/path/that/wraps/across/multiple/lines/in/the/terminal"
+	lines := formatIRCMessage(archive.Message{ //nolint:exhaustruct_v5
+		ID:         1700000000000,
+		Direction:  testDirection,
+		AuthorID:   testAuthorID,
+		AuthorName: testAuthorName,
+		Content:    "See " + fullURL + " for details",
+	}, 45)
+
+	require.GreaterOrEqual(t, len(lines), 3)
+
+	matchedChunks := 0
+	for _, line := range lines {
+		if uri := extractHyperlinkURI(line); uri != "" {
+			require.Equal(t, fullURL, uri)
+
+			matchedChunks++
+		}
+	}
+
+	require.GreaterOrEqual(t, matchedChunks, 2)
+}

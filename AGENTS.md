@@ -19,11 +19,12 @@
 Always use the `Makefile` targets:
 
 ```bash
-make build   # CGO_ENABLED=0 go build ./cmd/teams-tui
-make install # CGO_ENABLED=0 go install ./cmd/teams-tui
-make test    # go test ./...
-make lint    # golangci-lint run --allow-parallel-runners
-make deps    # go mod tidy && go mod vendor
+make build     # CGO_ENABLED=0 go build ./cmd/teams-tui
+make install   # CGO_ENABLED=0 go install ./cmd/teams-tui
+make test      # go test ./...
+make lint      # golangci-lint run --allow-parallel-runners
+make deps      # go mod tidy && go mod vendor
+make run-teams # Start teams-for-linux live-injecting ./message-logger.js
 ```
 
 ## Key Implementation Details
@@ -33,4 +34,5 @@ make deps    # go mod tidy && go mod vendor
 - **Colors (`hashColor`)**: Both `AuthorColor` and `ThreadColor` take the first 6 hex characters of `md5.Sum` (`#%x` of `sum[:3]`).
 - **Threads**: Single-line standalone thread messages render `• ` (in `ThreadColor`) before the timestamp; multi-line standalone thread messages and multi-message threads start with `┌ ` on the first line of the first message, mark the first line of each subsequent message with `├ ` (when the thread continues after that line), continue with `│ ` across intermediate lines, and end with `└ ` on the last line of the last message in the thread.
 - **Emoji Width & Scrollbar Alignment**: `sanitizeText` strips `U+FE0F` (Variation Selector-16) so 1-cell BMP dingbats like `❤` (`U+2764`) and `☝` (`U+261D`) have matching widths in `lipgloss.Width` and terminal `wcwidth`, keeping the right-hand scrollbar aligned.
+- **Attachments**: `message-logger.js` archives inline images and file attachments by SHA-256 content hash under `~/.local/share/teams-archive/attachments/ab/cd/ef/<checksum>.<ext>` and maps them in `message_attachments(message_id, filename, checksum, extension)`.
 - **Linter Conventions**: The global `~/.golangci.yml` enforces `wsl_v5`, `funlen` (60 lines / 40 statements), `gocognit` (<= 20), `goconst`, `misspell`, and `exhaustruct_v5`. Run `make lint` after every change.

@@ -5,7 +5,10 @@ import (
 	"cmp"
 	"context"
 	"crypto/md5" //nolint:gosec
+	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +19,8 @@ import (
 	"github.com/jovandeginste/teams-tui/pkg/archive"
 )
 
+var openAttachmentFunc = openWithXDG
+
 const (
 	sidebarWidth        = 30
 	defaultMessageLimit = 200
@@ -23,10 +28,18 @@ const (
 	errorDisplayTTL     = 2 * time.Second
 	wheelScrollStep     = 3
 
+	attachmentPrefix = "[attachment: "
+
 	modeNone      = ""
 	modeChannel   = "channel"
 	modeInChannel = "messages"
 	modeGlobal    = "global"
+
+	keyCtrlC = "ctrl+c"
+	keyUp    = "up"
+	keyDown  = "down"
+	keyHome  = "home"
+	keyEnd   = "end"
 )
 
 type threadRole int
@@ -65,6 +78,8 @@ type Model struct {
 	refreshInFlight int
 	focusMessages   bool
 	showHelp        bool
+	showAttachments bool
+	attachmentIndex int
 	scrollOffset    int // lines from bottom (0 = follow latest)
 	messageLimit    int
 	searchMode      string
@@ -131,18 +146,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 	case tea.MouseMsg:
-		m.handleMouse(msg)
-
-		return m, nil
+		return m, m.handleMouse(msg)
 	case tea.KeyMsg:
 		if m.showHelp {
-			if msg.String() == "ctrl+c" {
+			if msg.String() == keyCtrlC {
 				return m, tea.Quit
 			}
 
 			m.showHelp = false
 
 			return m, nil
+		}
+
+		if m.showAttachments {
+			return m, m.handleAttachmentKey(msg.String())
 		}
 
 		if m.searchMode != modeNone {
@@ -211,58 +228,60 @@ func (m *Model) activeMessageFilter() string {
 	return m.globalQuery
 }
 
-func (m *Model) handleMouse(msg tea.MouseMsg) {
+func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	inSidebar := msg.X < m.leftPaneWidth()
 
 	switch msg.Button { //nolint:exhaustive
 	case tea.MouseButtonWheelUp:
 		if inSidebar {
-			m.handleChannelKey("up")
+			m.handleChannelKey(keyUp)
 		} else {
 			m.scrollBy(wheelScrollStep)
 		}
 	case tea.MouseButtonWheelDown:
 		if inSidebar {
-			m.handleChannelKey("down")
+			m.handleChannelKey(keyDown)
 		} else {
 			m.scrollBy(-wheelScrollStep)
 		}
 	case tea.MouseButtonLeft:
-		if msg.Action != tea.MouseActionPress {
-			return
-		}
-
-		if inSidebar {
-			if msg.Y == m.paneHeight()-1 {
-				m.showHelp = !m.showHelp
-				return
-			}
-
-			m.focusMessages = false
-			if idx := m.channelStartIndex() + msg.Y - 1; msg.Y >= 1 && idx >= 0 && idx < len(m.channels) {
-				m.selectChannel(idx)
-			}
-		} else {
-			m.focusMessages = true
+		if msg.Action == tea.MouseActionPress {
+			return m.handleLeftClick(msg.Y, inSidebar)
 		}
 	}
+
+	return nil
+}
+
+func (m *Model) handleLeftClick(row int, inSidebar bool) tea.Cmd {
+	if inSidebar {
+		if row == m.paneHeight()-1 {
+			m.showHelp = !m.showHelp
+			return nil
+		}
+
+		m.focusMessages = false
+		if idx := m.channelStartIndex() + row - 1; row >= 1 && idx >= 0 && idx < len(m.channels) {
+			m.selectChannel(idx)
+		}
+
+		return nil
+	}
+
+	m.focusMessages = true
+	if target := m.linkTargetAtRow(row); target != "" {
+		return m.openTarget(target)
+	}
+
+	return nil
 }
 
 func (m *Model) handleKey(key string) tea.Cmd {
 	switch key {
-	case "q", "ctrl+c":
+	case "q", keyCtrlC:
 		return tea.Quit
 	case "esc":
-		if m.clearFilters() {
-			return nil
-		}
-
-		if m.focusMessages {
-			m.focusMessages = false
-			return nil
-		}
-
-		return tea.Quit
+		return m.handleEsc()
 	case "/":
 		if m.focusMessages {
 			m.searchMode = modeInChannel
@@ -275,6 +294,8 @@ func (m *Model) handleKey(key string) tea.Cmd {
 		m.searchMode = modeInChannel
 	case "s":
 		m.searchMode = modeGlobal
+	case "o":
+		return m.triggerOpenAttachment()
 	case "?":
 		m.showHelp = true
 	case "tab":
@@ -302,6 +323,19 @@ func (m *Model) handleKey(key string) tea.Cmd {
 	return nil
 }
 
+func (m *Model) handleEsc() tea.Cmd {
+	if m.clearFilters() {
+		return nil
+	}
+
+	if m.focusMessages {
+		m.focusMessages = false
+		return nil
+	}
+
+	return tea.Quit
+}
+
 func (m *Model) clearFilters() bool {
 	if m.messageQuery != "" {
 		m.messageQuery = ""
@@ -325,19 +359,19 @@ func (m *Model) clearFilters() bool {
 
 func (m *Model) handleChannelKey(key string) {
 	switch key {
-	case "up", "k":
+	case keyUp, "k":
 		if m.selected > 0 {
 			m.selectChannel(m.selected - 1)
 		}
-	case "down", "j":
+	case keyDown, "j":
 		if m.selected < len(m.channels)-1 {
 			m.selectChannel(m.selected + 1)
 		}
-	case "home", "g":
+	case keyHome, "g":
 		if len(m.channels) > 0 {
 			m.selectChannel(0)
 		}
-	case "end", "G":
+	case keyEnd, "G":
 		if len(m.channels) > 0 {
 			m.selectChannel(len(m.channels) - 1)
 		}
@@ -346,13 +380,13 @@ func (m *Model) handleChannelKey(key string) {
 
 func (m *Model) handleMessageKey(key string) {
 	switch key {
-	case "up", "k":
+	case keyUp, "k":
 		m.scrollBy(1)
-	case "down", "j":
+	case keyDown, "j":
 		m.scrollBy(-1)
-	case "home", "g":
+	case keyHome, "g":
 		m.scrollOffset = max(len(m.renderedLines())-m.messageBodyHeight(), 0)
-	case "end", "G":
+	case keyEnd, "G":
 		m.scrollOffset = 0
 		m.messageLimit = defaultMessageLimit
 	}
@@ -637,6 +671,10 @@ func (m *Model) View() string {
 		return overlayCenter(mainView, m.renderHelpBox(), m.width, m.height)
 	}
 
+	if m.showAttachments {
+		return overlayCenter(mainView, m.renderAttachmentsBox(), m.width, m.height)
+	}
+
 	return mainView
 }
 
@@ -651,6 +689,7 @@ func (m *Model) renderHelpBox() string {
 		"  c (or /)        Filter channels by name",
 		"  f (or /)        Search messages in current channel",
 		"  s               Search messages across all channels",
+		"  o               Open attachment (xdg-open)",
 		"  esc             Clear active filter / unfocus messages",
 		"  ?               Toggle this help popup",
 		"  q, ctrl+c       Quit",
@@ -695,6 +734,223 @@ func overlayCenter(bg, fg string, width, height int) string {
 	}
 
 	return strings.Join(bgLines, "\n")
+}
+
+type attachmentEntry struct {
+	message    archive.Message
+	attachment archive.Attachment
+}
+
+func (m *Model) channelAttachments() []attachmentEntry {
+	var out []attachmentEntry
+
+	for _, msg := range m.messages {
+		for _, att := range msg.Attachments {
+			out = append(out, attachmentEntry{message: msg, attachment: att})
+		}
+	}
+
+	return out
+}
+
+func (m *Model) triggerOpenAttachment() tea.Cmd {
+	items := m.channelAttachments()
+	if len(items) == 0 {
+		return m.setError(errors.New("no attachments in this channel"))
+	}
+
+	if len(items) == 1 {
+		return m.openAttachment(items[0].attachment)
+	}
+
+	m.attachmentIndex = len(items) - 1
+	m.showAttachments = true
+
+	return nil
+}
+
+func (m *Model) handleAttachmentKey(key string) tea.Cmd {
+	items := m.channelAttachments()
+	if len(items) == 0 {
+		m.showAttachments = false
+		return nil
+	}
+
+	switch key {
+	case keyCtrlC:
+		return tea.Quit
+	case "esc", "q":
+		m.showAttachments = false
+	case keyUp, "k":
+		m.attachmentIndex = max(m.attachmentIndex-1, 0)
+	case keyDown, "j":
+		m.attachmentIndex = min(m.attachmentIndex+1, len(items)-1)
+	case keyHome, "g":
+		m.attachmentIndex = 0
+	case keyEnd, "G":
+		m.attachmentIndex = len(items) - 1
+	case "enter", "o":
+		idx := min(max(m.attachmentIndex, 0), len(items)-1)
+		m.showAttachments = false
+
+		return m.openAttachment(items[idx].attachment)
+	}
+
+	return nil
+}
+
+func (m *Model) openAttachment(att archive.Attachment) tea.Cmd {
+	return m.openTarget(m.store.AttachmentPath(att))
+}
+
+func (m *Model) openTarget(target string) tea.Cmd {
+	if err := openAttachmentFunc(target); err != nil {
+		return m.setError(err)
+	}
+
+	return nil
+}
+
+func (m *Model) setError(err error) tea.Cmd {
+	m.err = err
+
+	return tea.Tick(errorDisplayTTL, func(time.Time) tea.Msg {
+		return clearErrMsg{}
+	})
+}
+
+func (m *Model) linkTargetAtRow(row int) string {
+	if row < 2 {
+		return ""
+	}
+
+	bodyHeight := m.messageBodyHeight()
+	width := m.messageBodyWidth()
+	roles := computeThreadRoles(m.messages)
+	lines := m.renderedLines()
+	total := len(lines)
+
+	maxOffset := max(total-bodyHeight, 0)
+	offset := min(max(m.scrollOffset, 0), maxOffset)
+	start := max(total-offset-bodyHeight, 0)
+	targetIdx := start + (row - 2)
+
+	cur := 0
+	for i, msg := range m.messages {
+		msgLines := formatIRCMessage(msg, width, roles[i])
+		if targetIdx >= cur && targetIdx < cur+len(msgLines) {
+			return m.resolveLineLinkTarget(msg, msgLines[targetIdx-cur])
+		}
+
+		cur += len(msgLines)
+	}
+
+	return ""
+}
+
+func (m *Model) resolveLineLinkTarget(msg archive.Message, line string) string {
+	if uri := extractHyperlinkURI(line); uri != "" {
+		return uri
+	}
+
+	plain := strings.TrimSpace(ansi.Strip(line))
+	if plain == "" {
+		return ""
+	}
+
+	for _, att := range msg.Attachments {
+		label := attachmentPrefix + sanitizeText(cmp.Or(att.Filename, att.Checksum)) + "]"
+		if strings.Contains(plain, label) || strings.Contains(label, plain) {
+			return m.store.AttachmentPath(att)
+		}
+	}
+
+	return ""
+}
+
+func extractHyperlinkURI(line string) string {
+	const osc8Prefix = "\x1b]8;"
+
+	_, rest, ok := strings.Cut(line, osc8Prefix)
+	if !ok {
+		return ""
+	}
+
+	_, rest, ok = strings.Cut(rest, ";")
+	if !ok {
+		return ""
+	}
+
+	uri, _, ok := strings.Cut(rest, "\x07")
+	if !ok {
+		return ""
+	}
+
+	return uri
+}
+
+func (m *Model) renderAttachmentsBox() string {
+	items := m.channelAttachments()
+	maxList := max(min(m.height-10, 12), 3)
+	boxWidth := max(min(m.width-12, 72), 36)
+
+	idx := min(max(m.attachmentIndex, 0), max(len(items)-1, 0))
+	start := max(idx-maxList+1, 0)
+	end := min(start+maxList, len(items))
+
+	activeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#282a36")).Background(lipgloss.Color("#bd93f9"))
+	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f8f8f2"))
+
+	rows := []string{
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffb86c")).Render("Open Attachment (xdg-open)"),
+		"",
+	}
+
+	for i := start; i < end; i++ {
+		item := items[i]
+		author := cmp.Or(sanitizeText(item.message.AuthorName), sanitizeText(item.message.AuthorID))
+		name := cmp.Or(sanitizeText(item.attachment.Filename), item.attachment.Checksum)
+		entryText := fmt.Sprintf("%s <%s> %s", item.message.Timestamp.Format("2006-01-02 15:04"), author, name)
+		entryText = truncate(entryText, boxWidth-6)
+
+		if i == idx {
+			rows = append(rows, activeStyle.Render("> "+entryText))
+		} else {
+			rows = append(rows, normalStyle.Render("  "+entryText))
+		}
+	}
+
+	rows = append(rows,
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#6272a4")).Italic(true).Render("↑/↓/j/k: select   enter/o: open   esc: cancel"),
+	)
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#bd93f9")).
+		Padding(1, 3).
+		Render(strings.Join(rows, "\n"))
+}
+
+func openWithXDG(target string) error {
+	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
+		if _, err := os.Stat(target); err != nil {
+			return fmt.Errorf("attachment not found: %w", err)
+		}
+	}
+
+	cmd := exec.CommandContext(context.Background(), "xdg-open", target)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("xdg-open: %w", err)
+	}
+
+	go func() {
+		if err := cmd.Wait(); err != nil {
+			return
+		}
+	}()
+
+	return nil
 }
 
 func (m *Model) renderChannels(width, height int) string {
@@ -854,11 +1110,7 @@ func formatIRCMessage(msg archive.Message, width int, roles ...threadRole) []str
 
 	ts, prefixWidth, contWidth := renderPrefix(msg, width, role)
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6272a4")).Italic(true)
-
-	content := sanitizeText(msg.Content)
-	if msg.Reactions != "" {
-		content += " [" + sanitizeText(msg.Reactions) + "]"
-	}
+	content := formatMessageContent(msg)
 
 	if msg.Direction == "event" || (msg.AuthorID == "" && msg.AuthorName == "") {
 		lines := formatEventLines(ts, indent, max(width-prefixWidth, 10), contWidth, content, dimStyle)
@@ -878,11 +1130,10 @@ func formatIRCMessage(msg archive.Message, width int, roles ...threadRole) []str
 	if !strings.Contains(content, "\n") {
 		content = normalizeMentions(content, msg.Mentions)
 		firstWidth := max(width-(prefixWidth+cellWidth(nickPlain)+1), 10)
-		chunks := wrapFirstThenRest(content, firstWidth, contWidth)
+		chunks := styleWrappedChunks(content, wrapFirstThenRest(content, firstWidth, contWidth), msg.Mentions)
 		out := make([]string, 0, len(chunks))
 
-		for i, chunk := range chunks {
-			styled := styleInlineText(chunk, msg.Mentions)
+		for i, styled := range chunks {
 			if i == 0 {
 				out = append(out, fmt.Sprintf("%s%s %s", ts, nickRendered, styled))
 			} else {
@@ -902,6 +1153,25 @@ func formatIRCMessage(msg archive.Message, width int, roles ...threadRole) []str
 	}
 
 	return applyThreadGutter(out, msg, role)
+}
+
+func formatMessageContent(msg archive.Message) string {
+	content := sanitizeText(msg.Content)
+
+	for _, att := range msg.Attachments {
+		label := attachmentPrefix + sanitizeText(cmp.Or(att.Filename, att.Checksum)) + "]"
+		if content == "" {
+			content = label
+		} else {
+			content += "\n" + label
+		}
+	}
+
+	if msg.Reactions != "" {
+		content += " [" + sanitizeText(msg.Reactions) + "]"
+	}
+
+	return content
 }
 
 func defaultThreadRole(msg archive.Message) threadRole {
@@ -1055,12 +1325,9 @@ func formatMultilineBody(rawLines []string, width int, mentions []archive.Mentio
 func formatBodyLine(line string, width int, mentions []archive.Mention) []string {
 	trimmed := strings.TrimLeft(line, " ")
 	if !strings.HasPrefix(trimmed, ">") {
-		parts := wrapLine(normalizeMentions(line, mentions), width)
-		for i, part := range parts {
-			parts[i] = styleInlineText(part, mentions)
-		}
+		norm := normalizeMentions(line, mentions)
 
-		return parts
+		return styleWrappedChunks(norm, wrapLine(norm, width), mentions)
 	}
 
 	quoteBody := strings.TrimPrefix(strings.TrimPrefix(trimmed, ">"), " ")
@@ -1139,6 +1406,145 @@ func styleMentions(s string, mentions []archive.Mention) string {
 	}
 
 	return s
+}
+
+type textLink struct {
+	start int
+	end   int
+	uri   string
+	id    string
+}
+
+func styleWrappedChunks(s string, chunks []string, mentions []archive.Mention) []string {
+	links := findLinks(s)
+	out := make([]string, len(chunks))
+	pos := 0
+
+	for i, chunk := range chunks {
+		start := pos
+		end := pos + len(chunk)
+		pos = end
+		out[i] = styleChunkWithLinks(s, start, end, links, mentions)
+	}
+
+	return out
+}
+
+func styleChunkWithLinks(s string, start, end int, links []textLink, mentions []archive.Mention) string {
+	linkStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#8be9fd")).Underline(true)
+
+	var b strings.Builder
+
+	cur := start
+	for _, l := range links {
+		if l.end <= cur || l.start >= end {
+			continue
+		}
+
+		if l.start > cur {
+			b.WriteString(styleInlineText(s[cur:l.start], mentions))
+		}
+
+		segStart := max(l.start, cur)
+		segEnd := min(l.end, end)
+		rendered := linkStyle.Render(s[segStart:segEnd])
+
+		if l.uri != "" {
+			rendered = ansi.SetHyperlink(l.uri, "id="+l.id) + rendered + ansi.ResetHyperlink()
+		}
+
+		b.WriteString(rendered)
+
+		cur = segEnd
+	}
+
+	if cur < end {
+		b.WriteString(styleInlineText(s[cur:end], mentions))
+	}
+
+	return b.String()
+}
+
+func findLinks(s string) []textLink {
+	var links []textLink
+
+	offset := 0
+	for offset < len(s) {
+		attIdx := strings.Index(s[offset:], attachmentPrefix)
+		httpIdx := indexURL(s[offset:])
+
+		switch {
+		case attIdx >= 0 && (httpIdx < 0 || attIdx <= httpIdx):
+			start := offset + attIdx
+			if endRel := strings.IndexByte(s[start:], ']'); endRel >= 0 {
+				end := start + endRel + 1
+				links = append(links, textLink{start: start, end: end, uri: "", id: ""})
+				offset = end
+
+				continue
+			}
+
+			offset = start + len(attachmentPrefix)
+		case httpIdx >= 0:
+			start := offset + httpIdx
+			end := scanURLEnd(s, start)
+			uri := s[start:end]
+			links = append(links, textLink{
+				start: start,
+				end:   end,
+				uri:   uri,
+				id:    hashColor(uri)[1:],
+			})
+			offset = end
+		default:
+			return links
+		}
+	}
+
+	return links
+}
+
+func indexURL(s string) int {
+	iHTTPS := strings.Index(s, "https://")
+	iHTTP := strings.Index(s, "http://")
+
+	switch {
+	case iHTTPS >= 0 && iHTTP >= 0:
+		return min(iHTTPS, iHTTP)
+	case iHTTPS >= 0:
+		return iHTTPS
+	default:
+		return iHTTP
+	}
+}
+
+func scanURLEnd(s string, start int) int {
+	end := start
+	for end < len(s) {
+		b := s[end]
+		if b <= ' ' || b == '<' || b == '>' || b == '"' || b == '\'' || b == '`' {
+			break
+		}
+
+		end++
+	}
+
+	for end > start {
+		last := s[end-1]
+		if strings.ContainsRune(".,;:!?", rune(last)) {
+			end--
+			continue
+		}
+
+		if last == ')' && strings.Count(s[start:end], ")") > strings.Count(s[start:end], "(") {
+			end--
+			continue
+		}
+
+		break
+	}
+
+	return end
 }
 
 func mentionCandidates(m archive.Mention) []string {

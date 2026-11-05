@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -27,7 +28,8 @@ const (
 )
 
 type Store struct {
-	db *gorm.DB
+	db  *gorm.DB
+	dir string
 }
 
 type Channel struct {
@@ -62,19 +64,48 @@ type Mention struct {
 	Name string `json:"name" gorm:"column:author_name"`
 }
 
+type Attachment struct {
+	Filename  string `json:"filename" gorm:"column:filename"`
+	Checksum  string `json:"checksum" gorm:"column:checksum"`
+	Extension string `json:"extension" gorm:"column:extension"`
+}
+
+func (a Attachment) RelativePath() string {
+	if len(a.Checksum) < 6 {
+		return ""
+	}
+
+	name := a.Checksum
+	if ext := strings.TrimPrefix(a.Extension, "."); ext != "" {
+		name += "." + ext
+	}
+
+	return filepath.Join("attachments", a.Checksum[0:2], a.Checksum[2:4], a.Checksum[4:6], name)
+}
+
+func (a Attachment) Path(archiveDir string) string {
+	rel := a.RelativePath()
+	if rel == "" {
+		return ""
+	}
+
+	return filepath.Join(archiveDir, rel)
+}
+
 type Message struct {
-	ID          int64     `json:"id" gorm:"column:id"`
-	ThreadID    *int64    `json:"thread_id,omitempty" gorm:"column:thread_id"`
-	ChannelID   string    `json:"channel_id,omitempty" gorm:"column:channel_id"`
-	ChannelName string    `json:"channel,omitempty" gorm:"column:channel_name"`
-	ChannelType string    `json:"channel_type,omitempty" gorm:"column:channel_type"`
-	Direction   string    `json:"direction,omitempty" gorm:"column:direction"`
-	AuthorID    string    `json:"author_id,omitempty" gorm:"column:author_id"`
-	AuthorName  string    `json:"author,omitempty" gorm:"column:author_name"`
-	Content     string    `json:"content" gorm:"column:content"`
-	Reactions   string    `json:"reactions,omitempty" gorm:"column:reactions"`
-	Mentions    []Mention `json:"mentions,omitempty" gorm:"-"`
-	Timestamp   time.Time `json:"timestamp" gorm:"-"`
+	ID          int64        `json:"id" gorm:"column:id"`
+	ThreadID    *int64       `json:"thread_id,omitempty" gorm:"column:thread_id"`
+	ChannelID   string       `json:"channel_id,omitempty" gorm:"column:channel_id"`
+	ChannelName string       `json:"channel,omitempty" gorm:"column:channel_name"`
+	ChannelType string       `json:"channel_type,omitempty" gorm:"column:channel_type"`
+	Direction   string       `json:"direction,omitempty" gorm:"column:direction"`
+	AuthorID    string       `json:"author_id,omitempty" gorm:"column:author_id"`
+	AuthorName  string       `json:"author,omitempty" gorm:"column:author_name"`
+	Content     string       `json:"content" gorm:"column:content"`
+	Reactions   string       `json:"reactions,omitempty" gorm:"column:reactions"`
+	Mentions    []Mention    `json:"mentions,omitempty" gorm:"-"`
+	Attachments []Attachment `json:"attachments,omitempty" gorm:"-"`
+	Timestamp   time.Time    `json:"timestamp" gorm:"-"`
 }
 
 type Filter struct {
@@ -106,7 +137,15 @@ func Open(path string) (*Store, error) {
 		sqlDB.SetMaxIdleConns(0)
 	}
 
-	return &Store{db: db}, nil
+	return &Store{db: db, dir: filepath.Dir(path)}, nil
+}
+
+func (s *Store) AttachmentPath(a Attachment) string {
+	if s == nil || s.dir == "" {
+		return a.RelativePath()
+	}
+
+	return a.Path(s.dir)
 }
 
 func (s *Store) LastChange(ctx context.Context) (string, error) {
@@ -270,6 +309,7 @@ func (s *Store) Messages(ctx context.Context, f Filter) ([]Message, error) {
 	}
 
 	s.populateMentions(ctx, rows)
+	s.populateAttachments(ctx, rows)
 
 	return rows, nil
 }
@@ -309,6 +349,47 @@ func (s *Store) populateMentions(ctx context.Context, rows []Message) {
 
 	for i := range rows {
 		rows[i].Mentions = byMsg[rows[i].ID]
+	}
+}
+
+func (s *Store) populateAttachments(ctx context.Context, rows []Message) {
+	if len(rows) == 0 {
+		return
+	}
+
+	ids := make([]int64, len(rows))
+	for i := range rows {
+		ids[i] = rows[i].ID
+	}
+
+	var attachments []struct {
+		MessageID int64  `gorm:"column:message_id"`
+		Filename  string `gorm:"column:filename"`
+		Checksum  string `gorm:"column:checksum"`
+		Extension string `gorm:"column:extension"`
+	}
+
+	err := s.db.WithContext(ctx).
+		Table("message_attachments ma").
+		Select("ma.message_id, COALESCE(ma.filename, '') AS filename, COALESCE(ma.checksum, '') AS checksum, COALESCE(ma.extension, '') AS extension").
+		Where("ma.message_id IN ?", ids).
+		Order("ma.rowid ASC").
+		Scan(&attachments).Error
+	if err != nil || len(attachments) == 0 {
+		return
+	}
+
+	byMsg := make(map[int64][]Attachment, len(attachments))
+	for _, a := range attachments {
+		byMsg[a.MessageID] = append(byMsg[a.MessageID], Attachment{
+			Filename:  a.Filename,
+			Checksum:  a.Checksum,
+			Extension: a.Extension,
+		})
+	}
+
+	for i := range rows {
+		rows[i].Attachments = byMsg[rows[i].ID]
 	}
 }
 
