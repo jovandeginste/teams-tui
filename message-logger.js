@@ -144,27 +144,6 @@ function getAttachmentDiskPath(checksum, extension) {
   );
 }
 
-function saveAttachmentBufferSync(buf, extension) {
-  const checksum = crypto.createHash("sha256").update(buf).digest("hex");
-  const ext = cleanExtension(extension);
-  const destPath = getAttachmentDiskPath(checksum, ext);
-  const dir = path.dirname(destPath);
-  fs.mkdirSync(dir, { recursive: true });
-  if (!fs.existsSync(destPath)) {
-    const tmpPath = `${destPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    fs.writeFileSync(tmpPath, buf, { mode: 0o400 });
-    fs.chmodSync(tmpPath, 0o400);
-    fs.renameSync(tmpPath, destPath);
-  } else {
-    try {
-      fs.chmodSync(destPath, 0o400);
-    } catch {
-      // ignore chmod error on existing file
-    }
-  }
-  return { checksum, extension: ext, path: destPath };
-}
-
 async function saveAttachmentBuffer(buf, extension) {
   const checksum = crypto.createHash("sha256").update(buf).digest("hex");
   const ext = cleanExtension(extension);
@@ -321,526 +300,11 @@ function chooseBetterAuthorName(existing, next) {
   return next;
 }
 
-// --- Background SQLite Worker Process ---
-if (process.argv.includes("--db-worker")) {
-  const { DatabaseSync } = require("node:sqlite");
-  const dbDir = path.join(os.homedir(), ".local", "share", "teams-archive");
-  fs.mkdirSync(dbDir, { recursive: true });
-
-  const workerDb = new DatabaseSync(path.join(dbDir, "teams.db"));
-  workerDb.exec(`
-    PRAGMA busy_timeout = 5000;
-    PRAGMA journal_mode = WAL;
-    PRAGMA synchronous = NORMAL;
-    CREATE TABLE IF NOT EXISTS authors (
-      id TEXT PRIMARY KEY,
-      name TEXT
-    );
-    CREATE TABLE IF NOT EXISTS channels (
-      id TEXT PRIMARY KEY,
-      name TEXT,
-      team_name TEXT,
-      type TEXT,
-      last_sync TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS message_reactions (
-      message_id INTEGER,
-      key TEXT,
-      emoji TEXT,
-      count INTEGER,
-      PRIMARY KEY (message_id, key)
-    );
-    CREATE TABLE IF NOT EXISTS message_mentions (
-      message_id INTEGER,
-      author_id TEXT,
-      PRIMARY KEY (message_id, author_id),
-      FOREIGN KEY (message_id) REFERENCES messages(id),
-      FOREIGN KEY (author_id) REFERENCES authors(id)
-    );
-    CREATE TABLE IF NOT EXISTS message_attachments (
-      message_id INTEGER,
-      filename TEXT,
-      checksum TEXT,
-      extension TEXT,
-      PRIMARY KEY (message_id, checksum),
-      FOREIGN KEY (message_id) REFERENCES messages(id)
-    );
-    CREATE TABLE IF NOT EXISTS messages (
-      id INTEGER PRIMARY KEY,
-      thread_id INTEGER,
-      channel_id TEXT,
-      direction TEXT,
-      author_id TEXT,
-      content TEXT,
-      reactions TEXT,
-      timestamp TIMESTAMP,
-      recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE INDEX IF NOT EXISTS idx_messages_channel_timestamp ON messages(channel_id, timestamp);
-    CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id);
-    CREATE INDEX IF NOT EXISTS idx_messages_author_id ON messages(author_id);
-    CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
-    CREATE INDEX IF NOT EXISTS idx_message_mentions_author_id ON message_mentions(author_id);
-    CREATE INDEX IF NOT EXISTS idx_message_attachments_checksum ON message_attachments(checksum);
-    CREATE INDEX IF NOT EXISTS idx_authors_name ON authors(name);
-    CREATE INDEX IF NOT EXISTS idx_channels_name ON channels(name);
-    CREATE INDEX IF NOT EXISTS idx_messages_channel_id ON messages(channel_id, id DESC);
-  `);
-  try {
-    workerDb.exec("ALTER TABLE channels ADD COLUMN last_sync TIMESTAMP");
-  } catch {
-    // Column already exists
-  }
-  try {
-    workerDb.exec("ALTER TABLE channels ADD COLUMN team_name TEXT");
-  } catch {
-    // Column already exists
-  }
-
-  const wUpdateLastSync = workerDb.prepare(`
-    UPDATE channels
-    SET last_sync = datetime(? / 1000, 'unixepoch')
-    WHERE id = ? AND (last_sync IS NULL OR unixepoch(last_sync) * 1000 < ?)
-  `);
-  const wUpsertAuthor = workerDb.prepare(`
-    INSERT INTO authors (id, name) VALUES (?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      name = CASE
-        WHEN excluded.name IS NULL OR excluded.name = '' OR excluded.name LIKE '8:%' THEN authors.name
-        WHEN authors.name IS NULL OR authors.name = '' OR authors.name LIKE '8:%' THEN excluded.name
-        WHEN authors.name LIKE '% %' AND excluded.name NOT LIKE '% %' THEN authors.name
-        ELSE excluded.name
-      END
-  `);
-  const wSelectChannelInfo = workerDb.prepare(`
-    SELECT name, team_name, type FROM channels WHERE id = ?
-  `);
-  const wUpsertChannelStmt = workerDb.prepare(`
-    INSERT INTO channels (id, name, team_name, type) VALUES (?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      name = COALESCE(excluded.name, channels.name),
-      team_name = COALESCE(excluded.team_name, channels.team_name),
-      type = COALESCE(excluded.type, channels.type)
-  `);
-  const wUpsertMessage = workerDb.prepare(`
-    INSERT INTO messages (
-      id, thread_id, channel_id, direction, author_id, content, reactions, timestamp
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime(? / 1000, 'unixepoch'))
-    ON CONFLICT(id) DO UPDATE SET
-      thread_id = COALESCE(messages.thread_id, excluded.thread_id),
-      channel_id = CASE
-        WHEN excluded.channel_id LIKE '19:%' OR excluded.channel_id = '48:notes' THEN excluded.channel_id
-        ELSE COALESCE(messages.channel_id, excluded.channel_id)
-      END,
-      direction = CASE
-        WHEN excluded.direction IN ('sent', 'received') THEN excluded.direction
-        ELSE COALESCE(messages.direction, excluded.direction)
-      END,
-      author_id = COALESCE(messages.author_id, excluded.author_id),
-      content = CASE WHEN excluded.content != '' THEN excluded.content ELSE messages.content END,
-      reactions = COALESCE(excluded.reactions, messages.reactions),
-      recorded_at = CASE
-        WHEN excluded.content != '' AND excluded.content IS NOT messages.content THEN CURRENT_TIMESTAMP
-        ELSE messages.recorded_at
-      END
-  `);
-  const wDeleteReactions = workerDb.prepare(`
-    DELETE FROM message_reactions WHERE message_id = ?
-  `);
-  const wUpsertReaction = workerDb.prepare(`
-    INSERT INTO message_reactions (message_id, key, emoji, count)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(message_id, key) DO UPDATE SET
-      emoji = COALESCE(excluded.emoji, message_reactions.emoji),
-      count = excluded.count
-  `);
-  const wDeleteMentions = workerDb.prepare(`
-    DELETE FROM message_mentions WHERE message_id = ?
-  `);
-  const wUpsertMention = workerDb.prepare(`
-    INSERT OR IGNORE INTO message_mentions (message_id, author_id)
-    VALUES (?, ?)
-  `);
-  const wUpsertAttachment = workerDb.prepare(`
-    INSERT INTO message_attachments (message_id, filename, checksum, extension)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(message_id, checksum) DO UPDATE SET
-      filename = CASE
-        WHEN excluded.filename IS NOT NULL AND excluded.filename != '' AND (message_attachments.filename IS NULL OR message_attachments.filename = '' OR message_attachments.filename LIKE 'image.%')
-        THEN excluded.filename
-        ELSE message_attachments.filename
-      END,
-      extension = COALESCE(NULLIF(excluded.extension, ''), message_attachments.extension)
-  `);
-  const wTouchMessageRecordedAt = workerDb.prepare(`
-    UPDATE messages SET recorded_at = CURRENT_TIMESTAMP WHERE id = ?
-  `);
-  const wSelectAuthorName = workerDb.prepare(
-    `SELECT name FROM authors WHERE id = ?`
-  );
-  const wSelectChannelMessagesForNaming = workerDb.prepare(`
-    SELECT m.id, m.direction, m.author_id, a.name AS author_name, m.content
-    FROM messages m
-    LEFT JOIN authors a ON a.id = m.author_id
-    WHERE m.channel_id = ?
-    ORDER BY m.id ASC
-  `);
-  const wSelectEventMentionsForNaming = workerDb.prepare(`
-    SELECT a.name
-    FROM message_mentions mm
-    JOIN authors a ON a.id = mm.author_id
-    WHERE mm.message_id = ?
-  `);
-
-  function workerUpsertChannel(channelId, rawName, channelType, rawTeamName = null) {
-    let name = normalizeChannelName(rawName);
-    const teamName = normalizeChannelName(rawTeamName);
-    if (channelId) {
-      const existing = wSelectChannelInfo.get(channelId);
-      const existingName = normalizeChannelName(existing?.name);
-      if (
-        (channelType === "group chat" || channelId.endsWith("@thread.v2")) &&
-        shouldKeepExistingGroupChannelName(existingName, name)
-      ) {
-        name = existingName;
-      } else if (
-        existingName &&
-        teamName &&
-        name === teamName &&
-        existingName !== teamName
-      ) {
-        name = existingName;
-      }
-    }
-    wUpsertChannelStmt.run(
-      channelId,
-      name ?? null,
-      teamName ?? null,
-      channelType ?? null
-    );
-    return name;
-  }
-
-  function workerResolvePersonName(rawId, fallback = null) {
-    const id = normalizeAuthorId(rawId);
-    if (!id) return fallback || null;
-    if (id.startsWith("28:app:")) return fallback || "app";
-    if (id.startsWith("28:")) return fallback || "bot";
-    const row = wSelectAuthorName.get(id);
-    if (row?.name) return row.name;
-    return fallback || id;
-  }
-
-  function workerComputeGroupChatNameFromDb(channelId, me = null) {
-    if (!isCanonicalChannelId(channelId)) return null;
-    const rows = wSelectChannelMessagesForNaming.all(channelId);
-    if (rows.length === 0) return null;
-
-    const myId = me?.id || null;
-    const myName = me?.name?.trim() || null;
-    const active = new Set();
-    const all = new Set();
-    const removed = new Set();
-
-    const addName = (raw, force = false) => {
-      if (!raw) return;
-      let name = raw.trim();
-      if (name.startsWith("8:")) {
-        name = workerResolvePersonName(name);
-      }
-      if (
-        !name ||
-        name === myName ||
-        name === "bot" ||
-        name === "app" ||
-        name === "Polls" ||
-        name === "Everyone" ||
-        name === "Conference Virtual Assistant" ||
-        name.startsWith("8:") ||
-        name.startsWith("28:") ||
-        name.startsWith("4:") ||
-        name.startsWith("R.ICTS.")
-      ) {
-        return;
-      }
-      if (force) removed.delete(name);
-      all.add(name);
-      if (!removed.has(name)) active.add(name);
-    };
-
-    const removeName = (raw) => {
-      if (!raw) return;
-      let name = raw.trim();
-      if (name.startsWith("8:")) {
-        name = workerResolvePersonName(name);
-      }
-      if (!name) return;
-      active.delete(name);
-      removed.add(name);
-      for (const a of [...active]) {
-        if (a.split(/\s+/)[0].toLowerCase() === name.toLowerCase()) {
-          active.delete(a);
-          removed.add(a);
-        }
-      }
-    };
-
-    for (const r of rows) {
-      if (r.direction !== "event") {
-        if (r.author_id && (!myId || r.author_id !== myId)) {
-          addName(r.author_name || workerResolvePersonName(r.author_id), false);
-        }
-        continue;
-      }
-      const text = (r.content || "").trim();
-      const evMentions = wSelectEventMentionsForNaming
-        .all(r.id)
-        .map((x) => x.name)
-        .filter((n) => n && n !== myName);
-
-      if (text.includes(" removed ") || text.includes(" verwijderd")) {
-        const idx = text.indexOf(" removed ");
-        if (idx !== -1) {
-          addName(text.slice(0, idx).trim(), false);
-          for (const p of text.slice(idx + 9).split(",")) removeName(p);
-        } else if (evMentions.length >= 2) {
-          addName(evMentions[0], false);
-          for (const p of evMentions.slice(1)) removeName(p);
-        }
-      } else if (
-        text.endsWith(" left") ||
-        text.includes(" heeft de chat verlaten")
-      ) {
-        if (evMentions.length > 0) {
-          for (const p of evMentions) removeName(p);
-        } else {
-          removeName(text.replace(/\s*(?:left|heeft de chat verlaten).*$/, ""));
-        }
-      } else if (text.includes(" added ") || text.includes(" toegevoegd")) {
-        for (const p of evMentions) addName(p, true);
-        if (text.includes(" added ")) {
-          const idx = text.indexOf(" added ");
-          addName(text.slice(0, idx).trim(), true);
-          for (const p of text.slice(idx + 7).split(",")) addName(p, true);
-        }
-      } else if (
-        text.startsWith("Added ") ||
-        text.startsWith("Members added: ")
-      ) {
-        const rest = text.replace(/^(?:Added |Members added: )/, "");
-        for (const p of rest.split(",")) addName(p, true);
-      } else if (/^\d{13}8:orgid:/i.test(text)) {
-        const mris = [...text.matchAll(/8:orgid:[0-9a-f-]{36}/gi)].map((m) =>
-          m[0].toLowerCase()
-        );
-        if (mris.length === 2 && mris[0] === mris[1]) {
-          removeName(mris[0]);
-        } else {
-          for (const id of mris) addName(id, true);
-        }
-      } else if (text.startsWith("Call ended — ")) {
-        for (const p of text.slice("Call ended — ".length).split(",")) {
-          const clean = p.replace(/\s*\([^)]+\)\s*$/, "").trim();
-          addName(clean, false);
-        }
-      }
-    }
-
-    const chosen = active.size > 0 ? [...active] : [...all];
-    const deduped = dedupeParticipantNames(chosen, me);
-    return deduped.length > 0 ? deduped.join(", ") : null;
-  }
-
-  function sendInitSnapshot() {
-    if (!process.send) return;
-    const initAuthors = workerDb.prepare("SELECT id, name FROM authors").all();
-    const initChannels = workerDb
-      .prepare(
-        `SELECT
-          c.id,
-          c.name,
-          c.team_name,
-          c.type,
-          unixepoch(c.last_sync) * 1000 AS last_sync_ms,
-          (SELECT MAX(m.id) FROM messages m WHERE m.channel_id = c.id) AS max_id
-        FROM channels c`
-      )
-      .all();
-    const initAttachments = workerDb
-      .prepare(
-        "SELECT message_id, filename, checksum, extension FROM message_attachments"
-      )
-      .all();
-    process.send({
-      type: "init",
-      authors: initAuthors,
-      channels: initChannels,
-      attachments: initAttachments,
-    });
-  }
-
-  sendInitSnapshot();
-
-  process.on("message", (msg) => {
-    if (!msg) return;
-    if (msg.type === "request-init") {
-      sendInitSnapshot();
-      return;
-    }
-    if (msg.type !== "flush") return;
-    const {
-      authors = [],
-      channels = [],
-      records = [],
-      attachments = [],
-      lastSyncs = [],
-      groupNameRequests = [],
-    } = msg;
-
-    const updatedGroupNames = [];
-    workerDb.exec("BEGIN");
-    try {
-      for (const a of authors) {
-        if (a.id) wUpsertAuthor.run(a.id, a.name ?? null);
-      }
-      for (const c of channels) {
-        if (c.id) {
-          workerUpsertChannel(c.id, c.name, c.type, c.teamName);
-        }
-      }
-      for (const rec of records) {
-        if (rec.channelId) {
-          workerUpsertChannel(
-            rec.channelId,
-            rec.channelName ?? null,
-            rec.channelType ?? null,
-            rec.teamName ?? null
-          );
-        }
-        if (rec.authorId) {
-          wUpsertAuthor.run(rec.authorId, rec.authorName ?? null);
-        }
-        wUpsertMessage.run(
-          rec.id,
-          rec.threadId ?? null,
-          rec.channelId ?? null,
-          rec.direction,
-          rec.authorId ?? null,
-          rec.content ?? "",
-          rec.reactionsSummary ?? null,
-          rec.id
-        );
-        if (rec.reactions && rec.reactions.length > 0) {
-          wDeleteReactions.run(rec.id);
-          for (const r of rec.reactions) {
-            wUpsertReaction.run(rec.id, r.key, r.emoji ?? null, r.count);
-          }
-        }
-        wDeleteMentions.run(rec.id);
-        if (rec.mentions && rec.mentions.length > 0) {
-          for (const m of rec.mentions) {
-            if (!m.id) continue;
-            wUpsertAuthor.run(m.id, m.name ?? null);
-            wUpsertMention.run(rec.id, m.id);
-          }
-        }
-        if (rec.attachments && rec.attachments.length > 0) {
-          for (const att of rec.attachments) {
-            if (!att.checksum) continue;
-            wUpsertAttachment.run(
-              rec.id,
-              att.filename ?? "",
-              att.checksum,
-              att.extension ?? ""
-            );
-          }
-        }
-      }
-      for (const att of attachments) {
-        if (!att.messageId) continue;
-        let checksum = att.checksum || null;
-        let extension = cleanExtension(att.extension);
-        if (att.dataBase64) {
-          try {
-            const saved = saveAttachmentBufferSync(
-              Buffer.from(att.dataBase64, "base64"),
-              extension
-            );
-            checksum = saved.checksum;
-            extension = saved.extension;
-          } catch (err) {
-            console.warn(
-              "[message-logger-worker] failed to write attachment:",
-              err.message
-            );
-          }
-        }
-        if (checksum) {
-          wUpsertAttachment.run(
-            att.messageId,
-            att.filename ?? "",
-            checksum,
-            extension
-          );
-          wTouchMessageRecordedAt.run(att.messageId);
-        }
-      }
-      for (const ls of lastSyncs) {
-        if (ls.channelId && ls.syncTs) {
-          wUpdateLastSync.run(ls.syncTs, ls.channelId, ls.syncTs);
-        }
-      }
-      for (const req of groupNameRequests) {
-        const computed = workerComputeGroupChatNameFromDb(
-          req.channelId,
-          req.me
-        );
-        if (computed) {
-          const finalName = workerUpsertChannel(
-            req.channelId,
-            computed,
-            "group chat",
-            null
-          );
-          if (finalName) {
-            updatedGroupNames.push({
-              channelId: req.channelId,
-              name: finalName,
-            });
-          }
-        }
-      }
-      workerDb.exec("COMMIT");
-      try {
-        workerDb.exec("PRAGMA wal_checkpoint(PASSIVE)");
-      } catch {
-        // ignore checkpoint error
-      }
-    } catch (err) {
-      try {
-        workerDb.exec("ROLLBACK");
-      } catch {
-        // ignore rollback error
-      }
-      console.error("[message-logger-worker] flush error:", err);
-    }
-
-    if (updatedGroupNames.length > 0 && process.send) {
-      process.send({
-        type: "group-names",
-        updates: updatedGroupNames,
-      });
-    }
-  });
-
-  process.on("disconnect", () => process.exit(0));
-  return;
-}
-
 // --- Electron Main Process (DB worker supervisor + Archive Sync menu) ---
 if (process.type === "browser") {
   const { app, ipcMain, webContents } = require("electron");
-  const { fork } = require("node:child_process");
+  const { spawn } = require("node:child_process");
+  const readline = require("node:readline");
   const candidateAppDir = path.join(app.getAppPath(), "app");
   const appRoot = fs.existsSync(
     path.join(candidateAppDir, "menus", "appMenu.orig.js")
@@ -861,13 +325,23 @@ if (process.type === "browser") {
   let lastInitMsg = null;
 
   function ensureDbWorker() {
-    if (dbWorker && dbWorker.connected) return dbWorker;
+    if (dbWorker && dbWorker.stdin && !dbWorker.stdin.destroyed) {
+      return dbWorker;
+    }
     try {
-      dbWorker = fork(__filename, ["--db-worker"], {
-        execPath: process.env.TEAMS_LOGGER_NODE || "node",
-        stdio: ["ignore", "inherit", "inherit", "ipc"],
+      const workerBin = process.env.TEAMS_LOGGER_WORKER || "teams-worker";
+      dbWorker = spawn(workerBin, [], {
+        stdio: ["pipe", "pipe", "inherit"],
       });
-      dbWorker.on("message", (msg) => {
+      const rl = readline.createInterface({ input: dbWorker.stdout });
+      rl.on("line", (line) => {
+        if (!line.trim()) return;
+        let msg;
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          return;
+        }
         if (!msg) return;
         if (msg.type === "init") {
           lastInitMsg = msg;
@@ -884,16 +358,26 @@ if (process.type === "browser") {
         dbWorker = null;
       });
     } catch (err) {
-      console.error("[message-logger] Main failed to fork db-worker:", err);
+      console.error("[message-logger] Main failed to spawn teams-worker:", err);
     }
     return dbWorker;
+  }
+
+  function sendToWorker(payload) {
+    const worker = ensureDbWorker();
+    if (worker && worker.stdin && !worker.stdin.destroyed) {
+      try {
+        worker.stdin.write(`${JSON.stringify(payload)}\n`);
+      } catch {
+        // ignore broken pipe
+      }
+    }
   }
 
   ensureDbWorker();
 
   ipcMain.on("teams-logger-db", (event, payload) => {
     if (!payload || typeof payload !== "object") return;
-    const worker = ensureDbWorker();
     if (payload.type === "request-init") {
       if (lastInitMsg) {
         try {
@@ -901,14 +385,12 @@ if (process.type === "browser") {
         } catch {
           // ignore
         }
-      } else if (worker && worker.connected) {
-        worker.send({ type: "request-init" });
+      } else {
+        sendToWorker({ type: "request-init" });
       }
       return;
     }
-    if (worker && worker.connected) {
-      worker.send(payload);
-    }
+    sendToWorker(payload);
   });
 
   function sendSyncAction(action) {

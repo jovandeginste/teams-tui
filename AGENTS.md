@@ -6,11 +6,13 @@
 
 ## Repository Structure
 
-- `message-logger.js`: Electron main/renderer/worker injection script for `teams-for-linux` that populates `~/.local/share/teams-archive/teams.db`.
+- `message-logger.js`: Electron main/renderer injection script for `teams-for-linux` that streams archive batches to `teams-worker`.
 - `cmd/teams-tui/main.go`: CLI entrypoint (`spf13/cobra`). Running `teams-tui` starts the interactive TUI; `teams-tui messages` prints messages for a date range (defaulting to today).
+- `cmd/teams-worker/main.go`: CLI entrypoint (`spf13/cobra`) for the background SQLite worker daemon spawned by `message-logger.js`.
+- `pkg/worker/worker.go` & `pkg/worker/naming.go`: SQLite WAL writer, schema migrations, attachment storage (`0400`), and group-chat participant name resolution.
 - `pkg/archive/archive.go`: Read-only SQLite store (`gorm.io/gorm` + `github.com/glebarez/sqlite`), query filters (`ChannelsFiltered`, `Messages`), date range parsing (`ParseDate`), and `table`/`json` output (`github.com/aquasecurity/table`).
 - `pkg/archive/archive_test.go`: Unit tests for `pkg/archive`.
-- `pkg/tui/tui.go`: Interactive IRC-style Bubble Tea TUI (`github.com/charmbracelet/bubbletea`, `lipgloss`, `x/ansi`).
+- `pkg/tui/tui.go` & `pkg/tui/sixel.go`: Interactive IRC-style Bubble Tea TUI (`github.com/charmbracelet/bubbletea`, `lipgloss`, `x/ansi`) with inline Sixel image rendering.
 - `pkg/tui/tui_test.go`: Unit tests for message rendering, colors, scrolling, search modes, and help overlay.
 - `vendor/`: Vendored Go module dependencies.
 

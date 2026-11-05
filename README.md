@@ -29,7 +29,7 @@ The repository contains both the `teams-for-linux` injection script and the Go C
 - `message-logger.js`: Single-file injection script that operates in three modes depending on how it is invoked:
   - **Renderer preload (`process.type === "renderer"`)**: Observes DOM mutations, intercepts real-time conversation activity, drives ChatSvc API backfills, and batches records over IPC.
   - **Electron main process (`process.type === "browser"`)**: Wraps `appMenu.orig.js` to add the `Archive Sync` menu, registers the `teams-logger-db` IPC channel, and supervises the background DB worker.
-  - **Database worker (`--db-worker`)**: Runs under Node.js (`node:sqlite` with `PRAGMA journal_mode = WAL`) to persist batches into `~/.local/share/teams-archive/teams.db`.
+  - **Database worker (`cmd/teams-worker` + `pkg/worker`)**: Standalone Go binary (`CGO_ENABLED=0`, `glebarez/sqlite` in WAL mode) spawned by `message-logger.js` over `stdin`/`stdout` NDJSON to persist batches and `0400` attachment files into `~/.local/share/teams-archive/`.
 - `cmd/teams-tui/main.go`: Cobra CLI entrypoint launching the interactive TUI by default, plus the `messages` and `stats` subcommands.
 - `pkg/archive/archive.go`: Read-only immutable SQLite store (`gorm.io/gorm` + `github.com/glebarez/sqlite`, `CGO_ENABLED=0`), change token queries (`LastChange`), filters, and `table`/`json` output writers (`github.com/aquasecurity/table`).
 - `pkg/tui/tui.go`: Interactive terminal UI built with `github.com/charmbracelet/bubbletea`, `github.com/charmbracelet/lipgloss`, and `github.com/charmbracelet/x/ansi`.
