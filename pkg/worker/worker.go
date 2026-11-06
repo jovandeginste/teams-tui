@@ -24,9 +24,10 @@ import (
 )
 
 const (
-	maxScannerTokenSize = 64 * 1024 * 1024
-	attachmentFileMode  = 0o400
-	archiveDirMode      = 0o755
+	maxScannerTokenSize      = 64 * 1024 * 1024
+	DefaultMaxAttachmentSize = 20 * 1024 * 1024
+	attachmentFileMode       = 0o400
+	archiveDirMode           = 0o755
 
 	directionEvent      = "event"
 	personApp           = "app"
@@ -72,6 +73,7 @@ CREATE TABLE IF NOT EXISTS message_attachments (
 	filename TEXT,
 	checksum TEXT,
 	extension TEXT,
+	size INTEGER,
 	PRIMARY KEY (message_id, checksum),
 	FOREIGN KEY (message_id) REFERENCES messages(id)
 );
@@ -116,17 +118,18 @@ type recordAttachmentTasks struct {
 }
 
 type Worker struct {
-	db          *gorm.DB
-	dir         string
-	out         io.Writer
-	writeMu     sync.Mutex
-	dbMu        sync.Mutex
-	tokensMu    sync.RWMutex
-	tokens      AuthTokens
-	attCache    sync.Map
-	inFlight    sync.Map
-	pendingJobs atomic.Int64
-	jobCh       chan attachmentJob
+	db                *gorm.DB
+	dir               string
+	out               io.Writer
+	maxAttachmentSize int64
+	writeMu           sync.Mutex
+	dbMu              sync.Mutex
+	tokensMu          sync.RWMutex
+	tokens            AuthTokens
+	attCache          sync.Map
+	inFlight          sync.Map
+	pendingJobs       atomic.Int64
+	jobCh             chan attachmentJob
 }
 
 type AuthorPayload struct {
@@ -157,6 +160,7 @@ type AttachmentPayload struct {
 	Filename   string `json:"filename"`
 	Checksum   string `json:"checksum"`
 	Extension  string `json:"extension"`
+	Size       int64  `json:"size"`
 	DataBase64 string `json:"dataBase64"`
 }
 
@@ -229,13 +233,15 @@ type InitAttachment struct {
 	Filename  string `json:"filename" gorm:"column:filename"`
 	Checksum  string `json:"checksum" gorm:"column:checksum"`
 	Extension string `json:"extension" gorm:"column:extension"`
+	Size      int64  `json:"size" gorm:"column:size"`
 }
 
 type InitResponse struct {
-	Type        string           `json:"type"`
-	Authors     []InitAuthor     `json:"authors"`
-	Channels    []InitChannel    `json:"channels"`
-	Attachments []InitAttachment `json:"attachments"`
+	Type              string           `json:"type"`
+	MaxAttachmentSize int64            `json:"max_attachment_size"`
+	Authors           []InitAuthor     `json:"authors"`
+	Channels          []InitChannel    `json:"channels"`
+	Attachments       []InitAttachment `json:"attachments"`
 }
 
 type GroupNameUpdate struct {
@@ -267,19 +273,58 @@ func New(ctx context.Context, dbPath string, out io.Writer) (*Worker, error) {
 
 	_ = db.Exec("ALTER TABLE channels ADD COLUMN last_sync TIMESTAMP").Error
 	_ = db.Exec("ALTER TABLE channels ADD COLUMN team_name TEXT").Error
+	_ = db.Exec("ALTER TABLE message_attachments ADD COLUMN size INTEGER").Error
 
 	w := &Worker{ //nolint:exhaustruct_v5
-		db:    db,
-		dir:   dir,
-		out:   out,
-		jobCh: make(chan attachmentJob, 4096),
+		db:                db,
+		dir:               dir,
+		out:               out,
+		maxAttachmentSize: DefaultMaxAttachmentSize,
+		jobCh:             make(chan attachmentJob, 4096),
 	}
+
+	w.backfillAttachmentSizes()
 
 	for range 2 {
 		go w.attachmentWorkerLoop(ctx)
 	}
 
 	return w, nil
+}
+
+func (w *Worker) SetMaxAttachmentSize(limit int64) {
+	if limit > 0 {
+		w.maxAttachmentSize = limit
+	}
+}
+
+func (w *Worker) maxAttSize() int64 {
+	if w.maxAttachmentSize > 0 {
+		return w.maxAttachmentSize
+	}
+
+	return DefaultMaxAttachmentSize
+}
+
+func (w *Worker) backfillAttachmentSizes() {
+	var rows []InitAttachment
+
+	if err := w.db.Raw(`
+		SELECT message_id, COALESCE(checksum, '') AS checksum, COALESCE(extension, '') AS extension
+		FROM message_attachments
+		WHERE COALESCE(size, 0) <= 0
+	`).Scan(&rows).Error; err != nil {
+		return
+	}
+
+	for _, r := range rows {
+		if size := w.attachmentFileSize(r.Checksum, r.Extension); size > 0 {
+			_ = w.db.Exec(
+				"UPDATE message_attachments SET size = ? WHERE message_id = ? AND checksum = ?",
+				size, r.MessageID, r.Checksum,
+			).Error
+		}
+	}
 }
 
 func (w *Worker) updateTokens(tok *AuthTokens) {
@@ -336,10 +381,14 @@ func (w *Worker) currentTokens() AuthTokens {
 	}
 }
 
-func Run(ctx context.Context, dbPath string, in io.Reader, out io.Writer) error {
+func Run(ctx context.Context, dbPath string, in io.Reader, out io.Writer, maxAttachmentSize ...int64) error {
 	w, err := New(ctx, dbPath, out)
 	if err != nil {
 		return err
+	}
+
+	if len(maxAttachmentSize) > 0 && maxAttachmentSize[0] > 0 {
+		w.SetMaxAttachmentSize(maxAttachmentSize[0])
 	}
 
 	if err := w.SendInitSnapshot(ctx); err != nil {
@@ -419,7 +468,7 @@ func (w *Worker) SendInitSnapshot(ctx context.Context) error {
 	attachments := make([]InitAttachment, 0)
 
 	err = w.db.WithContext(ctx).Raw(`
-		SELECT message_id, COALESCE(filename, '') AS filename, COALESCE(checksum, '') AS checksum, COALESCE(extension, '') AS extension
+		SELECT message_id, COALESCE(filename, '') AS filename, COALESCE(checksum, '') AS checksum, COALESCE(extension, '') AS extension, COALESCE(size, 0) AS size
 		FROM message_attachments
 	`).Scan(&attachments).Error
 
@@ -430,10 +479,11 @@ func (w *Worker) SendInitSnapshot(ctx context.Context) error {
 	}
 
 	return w.writeJSON(InitResponse{
-		Type:        "init",
-		Authors:     authors,
-		Channels:    channels,
-		Attachments: attachments,
+		Type:              "init",
+		MaxAttachmentSize: w.maxAttSize(),
+		Authors:           authors,
+		Channels:          channels,
+		Attachments:       attachments,
 	})
 }
 
@@ -720,6 +770,7 @@ func (w *Worker) persistSavedAttachment(att AttachmentPayload) {
 				Filename:  att.Filename,
 				Checksum:  att.Checksum,
 				Extension: att.Extension,
+				Size:      att.Size,
 			},
 		}); err != nil {
 			return
@@ -768,13 +819,20 @@ func (w *Worker) flushAttachment(tx *gorm.DB, att AttachmentPayload) error {
 
 	checksum := att.Checksum
 	ext := cleanExt(att.Extension)
+	size := att.Size
 
 	if att.DataBase64 != "" {
+		limit := int(w.maxAttSize())
+		if base64.StdEncoding.DecodedLen(len(att.DataBase64)) >= limit {
+			return nil
+		}
+
 		raw, err := base64.StdEncoding.DecodeString(att.DataBase64)
-		if err == nil && len(raw) > 0 {
+		if err == nil && len(raw) > 0 && len(raw) < limit {
 			if savedSum, savedExt, err := w.SaveAttachment(raw, ext); err == nil {
 				checksum = savedSum
 				ext = savedExt
+				size = int64(len(raw))
 			}
 		}
 	}
@@ -783,7 +841,11 @@ func (w *Worker) flushAttachment(tx *gorm.DB, att AttachmentPayload) error {
 		return nil
 	}
 
-	if err := upsertAttachment(tx, att.MessageID, att.Filename, checksum, ext); err != nil {
+	if size <= 0 {
+		size = w.attachmentFileSize(checksum, ext)
+	}
+
+	if err := upsertAttachment(tx, att.MessageID, att.Filename, checksum, ext, size); err != nil {
 		return err
 	}
 
@@ -818,6 +880,10 @@ func (w *Worker) flushGroupNames(tx *gorm.DB, reqs []GroupNameRequest) ([]GroupN
 }
 
 func (w *Worker) SaveAttachment(buf []byte, rawExt string) (string, string, error) {
+	if len(buf) == 0 || int64(len(buf)) >= w.maxAttSize() {
+		return "", "", fmt.Errorf("attachment size %d out of bounds", len(buf))
+	}
+
 	sum := sha256.Sum256(buf)
 	checksum := hex.EncodeToString(sum[:])
 	ext := cleanExt(rawExt)
@@ -957,18 +1023,39 @@ func replaceMentions(tx *gorm.DB, messageID int64, mentions []MentionPayload) er
 	return nil
 }
 
-func upsertAttachment(tx *gorm.DB, messageID int64, filename, checksum, ext string) error {
+func (w *Worker) attachmentFileSize(checksum, rawExt string) int64 {
+	if len(checksum) < 6 {
+		return 0
+	}
+
+	name := checksum
+	if ext := cleanExt(rawExt); ext != "" {
+		name += "." + ext
+	}
+
+	p := filepath.Join(w.dir, "attachments", checksum[0:2], checksum[2:4], checksum[4:6], name)
+
+	info, err := os.Stat(p)
+	if err != nil {
+		return 0
+	}
+
+	return info.Size()
+}
+
+func upsertAttachment(tx *gorm.DB, messageID int64, filename, checksum, ext string, size int64) error {
 	return tx.Exec(`
-		INSERT INTO message_attachments (message_id, filename, checksum, extension)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO message_attachments (message_id, filename, checksum, extension, size)
+		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(message_id, checksum) DO UPDATE SET
 			filename = CASE
 				WHEN excluded.filename IS NOT NULL AND excluded.filename != '' AND (message_attachments.filename IS NULL OR message_attachments.filename = '' OR message_attachments.filename LIKE 'image.%')
 				THEN excluded.filename
 				ELSE message_attachments.filename
 			END,
-			extension = COALESCE(NULLIF(excluded.extension, ''), message_attachments.extension)
-	`, messageID, filename, checksum, ext).Error
+			extension = COALESCE(NULLIF(excluded.extension, ''), message_attachments.extension),
+			size = CASE WHEN excluded.size > 0 THEN excluded.size ELSE message_attachments.size END
+	`, messageID, filename, checksum, ext, size).Error
 }
 
 func upsertLastSync(tx *gorm.DB, channelID string, syncTS int64) error {

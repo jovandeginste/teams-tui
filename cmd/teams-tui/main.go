@@ -3,40 +3,43 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/jovandeginste/teams-tui/pkg/archive"
+	"github.com/jovandeginste/teams-tui/pkg/config"
 	"github.com/jovandeginste/teams-tui/pkg/tui"
 	"github.com/spf13/cobra"
 )
 
 func main() {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = "."
-	}
-
-	dbPath := filepath.Join(home, ".local", "share", "teams-archive", "teams.db")
-	channel := ""
+	var (
+		cfgFile string
+		cfg     config.Config
+	)
 
 	rootCmd := &cobra.Command{ //nolint:exhaustruct_v5
 		Use:          "teams-tui",
 		Short:        "Read-only IRC-style TUI for the teams-for-linux SQLite archive",
 		SilenceUsage: true,
+		PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
+			var err error
+
+			cfg, err = config.Load(cfgFile)
+
+			return err
+		},
 		RunE: func(_ *cobra.Command, _ []string) error {
-			store, err := archive.Open(dbPath)
+			store, err := archive.Open(cfg.DBPath)
 			if err != nil {
 				return err
 			}
 
-			return tui.Run(store, channel)
+			return tui.Run(store, cfg.Channel)
 		},
 	}
 
-	rootCmd.PersistentFlags().StringVarP(&dbPath, "db", "d", dbPath, "path to teams.db")
-	rootCmd.PersistentFlags().StringVarP(&channel, "channel", "c", "", "filter by channel name")
-	rootCmd.AddCommand(newMessagesCmd(&dbPath, &channel), newStatsCmd(&dbPath, &channel))
+	config.BindCommonFlags(rootCmd, &cfgFile)
+	rootCmd.AddCommand(newMessagesCmd(&cfg), newStatsCmd(&cfg))
 	rootCmd.InitDefaultCompletionCmd()
 
 	if err := rootCmd.Execute(); err != nil {
@@ -45,7 +48,7 @@ func main() {
 	}
 }
 
-func newStatsCmd(dbPath, channel *string) *cobra.Command {
+func newStatsCmd(cfg *config.Config) *cobra.Command {
 	var (
 		filter archive.StatsFilter
 		format string
@@ -55,9 +58,9 @@ func newStatsCmd(dbPath, channel *string) *cobra.Command {
 		Use:   "stats",
 		Short: "Show top channels by total messages or messages sent by you",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			filter.Channel = *channel
+			filter.Channel = cfg.Channel
 
-			store, err := archive.Open(*dbPath)
+			store, err := archive.Open(cfg.DBPath)
 			if err != nil {
 				return err
 			}
@@ -79,7 +82,7 @@ func newStatsCmd(dbPath, channel *string) *cobra.Command {
 	return cmd
 }
 
-func newMessagesCmd(dbPath, channel *string) *cobra.Command {
+func newMessagesCmd(cfg *config.Config) *cobra.Command {
 	var (
 		from   string
 		to     string
@@ -95,7 +98,7 @@ func newMessagesCmd(dbPath, channel *string) *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			var err error
 
-			filter.Channel = *channel
+			filter.Channel = cfg.Channel
 
 			if filter.From, err = archive.ParseDate(from, false); err != nil {
 				return err
@@ -105,7 +108,7 @@ func newMessagesCmd(dbPath, channel *string) *cobra.Command {
 				return err
 			}
 
-			store, err := archive.Open(*dbPath)
+			store, err := archive.Open(cfg.DBPath)
 			if err != nil {
 				return err
 			}

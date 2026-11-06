@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -595,6 +594,7 @@ func (w *Worker) resolveAndSaveAttachment(ctx context.Context, messageID int64, 
 		Filename:  filename,
 		Checksum:  checksum,
 		Extension: savedExt,
+		Size:      int64(len(blob.buffer)),
 	}
 }
 
@@ -610,15 +610,21 @@ func isSpacerGIF(buf []byte) bool {
 }
 
 func (w *Worker) fetchAttachmentBlob(ctx context.Context, desc AttachmentDescriptor, expectedExt string) *downloadedBlob {
+	limit := int(w.maxAttSize())
+
 	if desc.DataBase64 != "" {
+		if base64.StdEncoding.DecodedLen(len(desc.DataBase64)) >= limit {
+			return nil
+		}
+
 		raw, err := base64.StdEncoding.DecodeString(desc.DataBase64)
-		if err == nil && len(raw) > 0 {
+		if err == nil && len(raw) > 0 && len(raw) < limit {
 			return &downloadedBlob{buffer: raw, contentType: "", dispositionName: ""}
 		}
 	}
 
 	if strings.HasPrefix(desc.URL, "data:") {
-		if blob := decodeDataURL(desc.URL); blob != nil {
+		if blob := decodeDataURL(desc.URL, limit); blob != nil {
 			return blob
 		}
 	}
@@ -634,7 +640,7 @@ func (w *Worker) fetchAttachmentBlob(ctx context.Context, desc AttachmentDescrip
 	return w.downloadSharePointOrDirectBlob(ctx, desc, expectedExt)
 }
 
-func decodeDataURL(dataURL string) *downloadedBlob {
+func decodeDataURL(dataURL string, limit int) *downloadedBlob {
 	header, payload, ok := strings.Cut(strings.TrimPrefix(dataURL, "data:"), ",")
 	if !ok {
 		return nil
@@ -642,8 +648,12 @@ func decodeDataURL(dataURL string) *downloadedBlob {
 
 	contentType, _, _ := strings.Cut(header, ";")
 	if strings.HasSuffix(header, ";base64") {
+		if base64.StdEncoding.DecodedLen(len(payload)) >= limit {
+			return nil
+		}
+
 		raw, err := base64.StdEncoding.DecodeString(payload)
-		if err == nil && len(raw) > 0 {
+		if err == nil && len(raw) > 0 && len(raw) < limit {
 			return &downloadedBlob{buffer: raw, contentType: contentType, dispositionName: ""}
 		}
 	}
@@ -798,7 +808,8 @@ func (w *Worker) httpGetBlob(ctx context.Context, targetURL string, headers map[
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	limit := w.maxAttSize()
+	if resp.StatusCode != http.StatusOK || resp.ContentLength >= limit {
 		return nil
 	}
 
@@ -809,8 +820,8 @@ func (w *Worker) httpGetBlob(ctx context.Context, targetURL string, headers map[
 		return nil
 	}
 
-	data, err := io.ReadAll(resp.Body)
-	if err != nil || len(data) == 0 {
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+	if err != nil || len(data) == 0 || int64(len(data)) >= limit {
 		return nil
 	}
 
@@ -843,17 +854,7 @@ func (w *Worker) hasArchivedAttachments(messageID int64, minCount int) bool {
 	}
 
 	for _, r := range rows {
-		if len(r.Checksum) < 6 {
-			return false
-		}
-
-		name := r.Checksum
-		if ext := cleanExt(r.Extension); ext != "" {
-			name += "." + ext
-		}
-
-		p := filepath.Join(w.dir, "attachments", r.Checksum[0:2], r.Checksum[2:4], r.Checksum[4:6], name)
-		if _, err := os.Stat(p); err != nil {
+		if w.attachmentFileSize(r.Checksum, r.Extension) <= 0 {
 			return false
 		}
 	}

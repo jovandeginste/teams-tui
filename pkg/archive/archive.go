@@ -68,6 +68,7 @@ type Attachment struct {
 	Filename  string `json:"filename" gorm:"column:filename"`
 	Checksum  string `json:"checksum" gorm:"column:checksum"`
 	Extension string `json:"extension" gorm:"column:extension"`
+	Size      int64  `json:"size,omitempty" gorm:"column:size"`
 }
 
 func (a Attachment) RelativePath() string {
@@ -375,25 +376,43 @@ func (s *Store) populateAttachments(ctx context.Context, rows []Message) {
 		Filename  string `gorm:"column:filename"`
 		Checksum  string `gorm:"column:checksum"`
 		Extension string `gorm:"column:extension"`
+		Size      int64  `gorm:"column:size"`
 	}
 
 	err := s.db.WithContext(ctx).
 		Table("message_attachments ma").
-		Select("ma.message_id, COALESCE(ma.filename, '') AS filename, COALESCE(ma.checksum, '') AS checksum, COALESCE(ma.extension, '') AS extension").
+		Select("ma.message_id, COALESCE(ma.filename, '') AS filename, COALESCE(ma.checksum, '') AS checksum, COALESCE(ma.extension, '') AS extension, COALESCE(ma.size, 0) AS size").
 		Where("ma.message_id IN ?", ids).
 		Order("ma.rowid ASC").
 		Scan(&attachments).Error
+	if err != nil {
+		err = s.db.WithContext(ctx).
+			Table("message_attachments ma").
+			Select("ma.message_id, COALESCE(ma.filename, '') AS filename, COALESCE(ma.checksum, '') AS checksum, COALESCE(ma.extension, '') AS extension").
+			Where("ma.message_id IN ?", ids).
+			Order("ma.rowid ASC").
+			Scan(&attachments).Error
+	}
+
 	if err != nil || len(attachments) == 0 {
 		return
 	}
 
 	byMsg := make(map[int64][]Attachment, len(attachments))
 	for _, a := range attachments {
-		byMsg[a.MessageID] = append(byMsg[a.MessageID], Attachment{
+		att := Attachment{
 			Filename:  a.Filename,
 			Checksum:  a.Checksum,
 			Extension: a.Extension,
-		})
+			Size:      a.Size,
+		}
+		if att.Size <= 0 && s.dir != "" {
+			if info, statErr := os.Stat(att.Path(s.dir)); statErr == nil {
+				att.Size = info.Size()
+			}
+		}
+
+		byMsg[a.MessageID] = append(byMsg[a.MessageID], att)
 	}
 
 	for i := range rows {

@@ -324,6 +324,9 @@ function initDbBridge() {
   ipcRenderer.on("teams-logger-db", (_event, msg) => {
     if (!msg) return;
     if (msg.type === "init") {
+      if (Number(msg.max_attachment_size) > 0) {
+        maxAttachmentSize = Number(msg.max_attachment_size);
+      }
       for (const a of msg.authors || []) {
         if (a.id && a.name) {
           authorCache.set(
@@ -1011,6 +1014,7 @@ function isDomContentImage(img) {
 }
 
 const capturedDomBlobs = new Set();
+let maxAttachmentSize = 20 * 1024 * 1024;
 
 function captureDomBlobImages(messageId, contentEl) {
   if (!contentEl || !messageId) return [];
@@ -1042,7 +1046,7 @@ function captureDomBlobImages(messageId, contentEl) {
         void nativeFetch(src)
           .then((r) => (r.ok ? r.arrayBuffer() : null))
           .then((ab) => {
-            if (!ab || ab.byteLength === 0) return;
+            if (!ab || ab.byteLength === 0 || ab.byteLength >= maxAttachmentSize) return;
             pendingAttachments.set(blobKey, {
               messageId,
               filename,

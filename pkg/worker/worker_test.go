@@ -41,11 +41,23 @@ func TestWorkerRunAndFlush(t *testing.T) {
 	require.Len(t, msgs[0].Attachments, 1)
 	require.Equal(t, "notes.txt", msgs[0].Attachments[0].Filename)
 	require.Equal(t, "txt", msgs[0].Attachments[0].Extension)
+	require.Equal(t, int64(len("hello attachment content")), msgs[0].Attachments[0].Size)
 
 	attPath := store.AttachmentPath(msgs[0].Attachments[0])
 	info, err := os.Stat(attPath)
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o400), info.Mode().Perm())
+
+	w, err := New(context.Background(), dbPath, nil)
+	require.NoError(t, err)
+
+	_, _, err = w.SaveAttachment(make([]byte, DefaultMaxAttachmentSize), "bin")
+	require.Error(t, err)
+
+	w.SetMaxAttachmentSize(8)
+
+	_, _, err = w.SaveAttachment(make([]byte, 8), "bin")
+	require.Error(t, err)
 }
 
 func TestWorkerCachedAttachmentFlushDoesNotDeadlock(t *testing.T) {

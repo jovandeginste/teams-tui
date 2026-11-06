@@ -32,6 +32,7 @@ func seedTestDB(t *testing.T) string {
 			filename TEXT,
 			checksum TEXT,
 			extension TEXT,
+			size INTEGER,
 			PRIMARY KEY (message_id, checksum)
 		);
 		CREATE TABLE messages (
@@ -53,8 +54,8 @@ func seedTestDB(t *testing.T) string {
 			(1700000000000, '19:chan1@thread.tacv2', 'received', '8:orgid:1', 'hello world Bob', '👍 1'),
 			(1700000060000, '19:chan1@thread.tacv2', 'sent', '8:orgid:2', 'reply here', NULL);
 		INSERT INTO message_mentions (message_id, author_id) VALUES (1700000000000, '8:orgid:2');
-		INSERT INTO message_attachments (message_id, filename, checksum, extension) VALUES
-			(1700000000000, 'diagram.png', 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789', 'png');
+		INSERT INTO message_attachments (message_id, filename, checksum, extension, size) VALUES
+			(1700000000000, 'diagram.png', 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789', 'png', 2048);
 	`).Error)
 
 	return path
@@ -87,6 +88,7 @@ func TestStoreQueries(t *testing.T) {
 		Filename:  "diagram.png",
 		Checksum:  "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
 		Extension: "png",
+		Size:      2048,
 	}}, msgs[0].Attachments)
 	require.Equal(t, filepath.Join("attachments", "ab", "cd", "ef", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789.png"), msgs[0].Attachments[0].RelativePath())
 	require.Equal(t, filepath.Join("/archive", "attachments", "ab", "cd", "ef", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789.png"), msgs[0].Attachments[0].Path("/archive"))

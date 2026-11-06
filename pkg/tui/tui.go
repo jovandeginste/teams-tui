@@ -920,7 +920,7 @@ func (m *Model) resolveLineLinkTarget(msg archive.Message, line string) string {
 	}
 
 	for _, att := range msg.Attachments {
-		label := attachmentPrefix + sanitizeText(cmp.Or(att.Filename, att.Checksum)) + "]"
+		label := formatAttachmentLabel(att)
 		if strings.Contains(plain, label) || strings.Contains(label, plain) {
 			return m.store.AttachmentPath(att)
 		}
@@ -970,7 +970,7 @@ func (m *Model) renderAttachmentsBox() string {
 	for i := start; i < end; i++ {
 		item := items[i]
 		author := cmp.Or(sanitizeText(item.message.AuthorName), sanitizeText(item.message.AuthorID))
-		name := cmp.Or(sanitizeText(item.attachment.Filename), item.attachment.Checksum)
+		name := formatAttachmentName(item.attachment)
 		entryText := fmt.Sprintf("%s <%s> %s", item.message.Timestamp.Format("2006-01-02 15:04"), author, name)
 		entryText = truncate(entryText, boxWidth-6)
 
@@ -1229,7 +1229,7 @@ func formatMessageContent(msg archive.Message) string {
 	content := sanitizeText(msg.Content)
 
 	for _, att := range msg.Attachments {
-		label := attachmentPrefix + sanitizeText(cmp.Or(att.Filename, att.Checksum)) + "]"
+		label := formatAttachmentLabel(att)
 		if content == "" {
 			content = label
 		} else {
@@ -1242,6 +1242,35 @@ func formatMessageContent(msg archive.Message) string {
 	}
 
 	return content
+}
+
+func formatAttachmentName(att archive.Attachment) string {
+	name := sanitizeText(cmp.Or(att.Filename, att.Checksum))
+	if att.Size > 0 {
+		return fmt.Sprintf("%s (%s)", name, formatByteSize(att.Size))
+	}
+
+	return name
+}
+
+func formatAttachmentLabel(att archive.Attachment) string {
+	return attachmentPrefix + formatAttachmentName(att) + "]"
+}
+
+func formatByteSize(size int64) string {
+	const unit = 1024
+
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+
+	div, exp := int64(unit), 0
+	for n := size / unit; n >= unit && exp < 3; n /= unit {
+		div *= unit
+		exp++
+	}
+
+	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGT"[exp])
 }
 
 func defaultThreadRole(msg archive.Message) threadRole {
