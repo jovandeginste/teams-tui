@@ -1,4 +1,6 @@
-.PHONY: build install test lint deps run-teams
+.PHONY: build install test lint deps run-teams appimage
+
+V ?= 2.28.0
 
 build:
 	@mkdir -p bin
@@ -20,22 +22,7 @@ deps:
 	go mod vendor
 
 run-teams: build
-	@WRAPPER="$$(command -v teams-for-linux)"; \
-	if [ -z "$$WRAPPER" ]; then \
-		echo "teams-for-linux not found in PATH" >&2; \
-		exit 1; \
-	fi; \
-	if pgrep -x teams-for-linux >/dev/null 2>&1; then \
-		echo "Closing existing teams-for-linux instance first..."; \
-		pkill -x teams-for-linux || true; \
-		sleep 1; \
-	fi; \
-	EXTRACTED="$$(sed -n 's/.*appimage-run -w \([^ ]*\).*/\1/p' "$$WRAPPER" | head -n1)"; \
-	if [ -z "$$EXTRACTED" ] || [ ! -d "$$EXTRACTED" ]; then \
-		echo "Could not locate extracted AppDir in $$WRAPPER" >&2; \
-		exit 1; \
-	fi; \
-	export TEAMS_LOGGER_WORKER="$(CURDIR)/bin/teams-worker"; \
-	export TEAMS_LOGGER_SCRIPT="$(CURDIR)/message-logger.js"; \
-	echo "Starting teams-for-linux with live $(CURDIR)/message-logger.js and $(CURDIR)/bin/teams-worker ..."; \
-	sed "s|--bind /nix /nix|--bind /nix /nix --ro-bind \"$(CURDIR)/message-logger.js\" \"$$EXTRACTED/resources/app/app/browser/message-logger.js\"|" "$$(command -v appimage-run)" | bash -s -- -w "$$EXTRACTED" -- $(TEAMS_ARGS)
+	./run-teams.sh $(TEAMS_ARGS)
+
+appimage:
+	./build-appimage.sh -V "$(V)"

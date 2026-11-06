@@ -81,7 +81,7 @@ in {
 
 ### Option 2: Manual `asar` Patching
 
-For a standard `teams-for-linux` installation where `resources/app.asar` is located in `/opt/teams-for-linux/resources`:
+For a standard `teams-for-linux` installation where `resources/app.asar` and `resources/app.asar.unpacked` are located in `/opt/teams-for-linux/resources` (keep `app.asar.unpacked` in the same directory when running `asar extract`):
 
 ```bash
 cd /opt/teams-for-linux/resources
@@ -95,7 +95,54 @@ mv app/app/menus/appMenu.js app/app/menus/appMenu.orig.js
 echo 'module.exports = require("../browser/message-logger.js");' > app/app/menus/appMenu.js
 ```
 
-When launching `teams-for-linux`, ensure `node` (v22.5+) is in `PATH` or set `TEAMS_LOGGER_NODE=/path/to/node`.
+When launching `teams-for-linux`, ensure `teams-worker` is in `PATH` or set `TEAMS_LOGGER_WORKER=/path/to/teams-worker`.
+
+### Option 3: Build a Custom AppImage from the Upstream AppImage
+
+Use `./build-appimage.sh` (or `make appimage`) to download the official `teams-for-linux` AppImage, inject `message-logger.js` and `teams-worker`, and repackage it into `bin/teams-for-linux-<version>-logger.AppImage` using [`appimagetool`](https://github.com/AppImage/appimagetool):
+
+```bash
+# Build using the default version (2.28.0) or specify a version with -V / V=...
+./build-appimage.sh -V 2.28.0
+# or via Make:
+make appimage V=2.28.0
+```
+
+Manual steps performed by the script:
+
+```bash
+# 1. Build teams-tui and teams-worker
+make build
+
+# 2. Download and extract the upstream AppImage (creates ./squashfs-root)
+VERSION="2.28.0"
+curl -fLO "https://github.com/IsmaelMartinez/teams-for-linux/releases/download/v${VERSION}/teams-for-linux-${VERSION}.AppImage"
+chmod +x "teams-for-linux-${VERSION}.AppImage"
+./"teams-for-linux-${VERSION}.AppImage" --appimage-extract
+
+# 3. Unpack app.asar inside squashfs-root/resources
+#    (keep app.asar.unpacked alongside app.asar during extraction)
+npx @electron/asar extract squashfs-root/resources/app.asar squashfs-root/resources/app
+rm squashfs-root/resources/app.asar
+
+# 4. Inject message-logger.js into preload.js and appMenu.js
+cp message-logger.js squashfs-root/resources/app/app/browser/message-logger.js
+echo 'require("./message-logger.js");' >> squashfs-root/resources/app/app/browser/preload.js
+mv squashfs-root/resources/app/app/menus/appMenu.js squashfs-root/resources/app/app/menus/appMenu.orig.js
+echo 'module.exports = require("../browser/message-logger.js");' > squashfs-root/resources/app/app/menus/appMenu.js
+
+# 5. Bundle teams-worker inside the AppDir (AppRun adds $APPDIR to PATH automatically)
+cp bin/teams-worker squashfs-root/teams-worker
+
+# 6. Optional: repack resources/app back into app.asar
+#    (if omitted, Electron loads resources/app directly)
+npx @electron/asar pack squashfs-root/resources/app squashfs-root/resources/app.asar \
+  --unpack-dir "node_modules/@cbor-extract"
+rm -rf squashfs-root/resources/app
+
+# 7. Repackage squashfs-root into a new AppImage
+ARCH=x86_64 appimagetool squashfs-root "teams-for-linux-${VERSION}-logger.AppImage"
+```
 
 ### Triggering Archive Sync in `teams-for-linux`
 
