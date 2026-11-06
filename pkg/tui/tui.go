@@ -1359,29 +1359,12 @@ func formatEventLines(ts, contPrefix string, firstWidth, contWidth int, content 
 }
 
 func wrapFirstThenRest(s string, firstWidth, restWidth int) []string {
-	if s == "" || cellWidth(s) <= firstWidth {
-		return []string{s}
+	first, rest := splitWrappedLine(s, firstWidth)
+	if rest == "" {
+		return []string{first}
 	}
 
-	var first strings.Builder
-
-	restIdx := len(s)
-
-	for i, r := range s {
-		if r != '\ufe0f' && first.Len() > 0 && cellWidth(first.String()+string(r)) > firstWidth {
-			restIdx = i
-			break
-		}
-
-		first.WriteRune(r)
-	}
-
-	out := []string{first.String()}
-	if restIdx < len(s) {
-		out = append(out, wrapLine(s[restIdx:], restWidth)...)
-	}
-
-	return out
+	return append([]string{first}, wrapLine(rest, restWidth)...)
 }
 
 func formatMultilineBody(rawLines []string, width int, mentions []archive.Mention) []string {
@@ -1520,6 +1503,10 @@ func styleWrappedChunks(s string, chunks []string, mentions []archive.Mention) [
 	pos := 0
 
 	for i, chunk := range chunks {
+		if rel := strings.Index(s[pos:], chunk); rel >= 0 {
+			pos += rel
+		}
+
 		start := pos
 		end := pos + len(chunk)
 		pos = end
@@ -1773,23 +1760,40 @@ func wrapLine(s string, width int) []string {
 		return []string{s}
 	}
 
-	var (
-		out  []string
-		line strings.Builder
-	)
+	var out []string
 
-	for _, r := range s {
-		if r != '\ufe0f' && line.Len() > 0 && cellWidth(line.String()+string(r)) > width {
-			out = append(out, line.String())
-			line.Reset()
-		}
-
-		line.WriteRune(r)
-	}
-
-	if line.Len() > 0 {
-		out = append(out, line.String())
+	for s != "" {
+		line, rest := splitWrappedLine(s, width)
+		out = append(out, line)
+		s = rest
 	}
 
 	return out
+}
+
+func splitWrappedLine(s string, width int) (string, string) {
+	if s == "" || cellWidth(s) <= width {
+		return s, ""
+	}
+
+	var b strings.Builder
+
+	cut := len(s)
+
+	for i, r := range s {
+		if r != '\ufe0f' && b.Len() > 0 && cellWidth(b.String()+string(r)) > width {
+			cut = i
+			break
+		}
+
+		b.WriteRune(r)
+	}
+
+	if cut < len(s) && s[cut] != ' ' {
+		if lastSpace := strings.LastIndexByte(s[:cut], ' '); lastSpace > 0 && strings.TrimSpace(s[:lastSpace]) != "" {
+			return strings.TrimRight(s[:lastSpace], " "), strings.TrimLeft(s[lastSpace+1:], " ")
+		}
+	}
+
+	return strings.TrimRight(s[:cut], " "), strings.TrimLeft(s[cut:], " ")
 }

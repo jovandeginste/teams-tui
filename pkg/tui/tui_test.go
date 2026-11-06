@@ -303,6 +303,24 @@ func TestOpenAttachments(t *testing.T) {
 	require.Equal(t, []string{filepath.Join(dir, "attachments", "ab", "cd", "ef", sum1+".png")}, opened)
 }
 
+func TestWordWrapping(t *testing.T) {
+	require.Equal(t, []string{"hello world", "from teams", "tui"}, wrapLine("hello world from teams tui", 12))
+	require.Equal(t, []string{"first", "second line", "third"}, wrapFirstThenRest("first second line third", 8, 12))
+
+	lines := formatIRCMessage(archive.Message{ //nolint:exhaustruct_v5
+		ID:         1700000000000,
+		Direction:  testDirection,
+		AuthorID:   testAuthorID,
+		AuthorName: testAuthorName,
+		Content:    "This sentence should wrap cleanly on word boundaries without splitting words.",
+	}, 50)
+
+	require.GreaterOrEqual(t, len(lines), 2)
+	require.NotContains(t, lines[0], "boundaries")
+	require.True(t, strings.HasPrefix(lines[1], "    "))
+	require.NotEqual(t, byte(' '), lines[1][4])
+}
+
 func TestWrappedHyperlinkPreservesFullURL(t *testing.T) {
 	fullURL := "https://example.com/very/long/path/that/wraps/across/multiple/lines/in/the/terminal"
 	lines := formatIRCMessage(archive.Message{ //nolint:exhaustruct_v5
