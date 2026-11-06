@@ -1,4 +1,4 @@
-.PHONY: build install test lint deps run-teams appimage
+.PHONY: build install test lint deps run-teams appimage appimage-nix
 
 V ?= 2.28.0
 
@@ -26,3 +26,6 @@ run-teams: build
 
 appimage:
 	./build-appimage.sh -V "$(V)"
+
+appimage-nix:
+	./build-appimage-nix.sh -V "$(V)"

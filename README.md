@@ -106,6 +106,11 @@ Use `./build-appimage.sh` (or `make appimage`) to download the official `teams-f
 ./build-appimage.sh -V 2.28.0
 # or via Make:
 make appimage V=2.28.0
+
+# On Nix / Home Manager (provides asar, appimage-run, and cached appimagetool via nix-shell):
+./build-appimage-nix.sh -V 2.28.0
+# or via Make:
+make appimage-nix V=2.28.0
 ```
 
 Manual steps performed by the script:

@@ -83,13 +83,17 @@ echo "==> Downloading upstream teams-for-linux v${VERSION}..."
 curl -fL "${UPSTREAM_URL}" -o "${UPSTREAM_APPIMAGE}"
 chmod +x "${UPSTREAM_APPIMAGE}"
 
-echo "==> Extracting upstream AppImage..."
-(
-  cd "${WORKDIR}"
-  "${UPSTREAM_APPIMAGE}" --appimage-extract >/dev/null
-)
-
 APPDIR="${WORKDIR}/squashfs-root"
+
+echo "==> Extracting upstream AppImage..."
+if command -v appimage-run >/dev/null 2>&1; then
+  appimage-run -x "${APPDIR}" "${UPSTREAM_APPIMAGE}" >/dev/null
+else
+  (
+    cd "${WORKDIR}"
+    "${UPSTREAM_APPIMAGE}" --appimage-extract >/dev/null
+  )
+fi
 
 echo "==> Extracting resources/app.asar..."
 "${ASAR_CMD[@]}" extract "${APPDIR}/resources/app.asar" "${APPDIR}/resources/app"
