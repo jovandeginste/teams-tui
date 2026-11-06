@@ -48,6 +48,45 @@ func TestWorkerRunAndFlush(t *testing.T) {
 	require.Equal(t, os.FileMode(0o400), info.Mode().Perm())
 }
 
+func TestWorkerCachedAttachmentFlushDoesNotDeadlock(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "teams.db")
+
+	pngData := base64.StdEncoding.EncodeToString([]byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01})
+	chanID := "19:group1@thread.v2"
+	rec := RecordPayload{ //nolint:exhaustruct_v5
+		ID:        1700000001000,
+		ChannelID: &chanID,
+		Direction: "received",
+		Content:   "first with inline image",
+		AttachmentTasks: []AttachmentDescriptor{{ //nolint:exhaustruct_v5
+			Key:        "ams:shared-obj",
+			Filename:   "shared.png",
+			Extension:  "png",
+			DataBase64: pngData,
+		}},
+	}
+	msg1 := RequestMessage{Type: "flush", Records: []RecordPayload{rec}} //nolint:exhaustruct_v5
+	rec.ID = 1700000002000
+	msg2 := RequestMessage{Type: msg1.Type, Records: []RecordPayload{rec}} //nolint:exhaustruct_v5
+
+	w, err := New(context.Background(), dbPath, nil)
+	require.NoError(t, err)
+	require.NoError(t, w.HandleFlush(context.Background(), msg1))
+	w.waitForAttachmentJobs()
+	require.NoError(t, w.HandleFlush(context.Background(), msg2))
+	w.waitForAttachmentJobs()
+
+	store, err := archive.Open(dbPath)
+	require.NoError(t, err)
+
+	msgs, err := store.Messages(context.Background(), archive.Filter{Limit: 10}) //nolint:exhaustruct_v5
+	require.NoError(t, err)
+	require.Len(t, msgs, 2)
+	require.Len(t, msgs[0].Attachments, 1)
+	require.Len(t, msgs[1].Attachments, 1)
+}
+
 func TestWorkerFormatAndAttachmentExtraction(t *testing.T) {
 	html := `<p>Hello <span itemtype="http://schema.skype.com/Mention">Alice</span></p>` +
 		`<pre class="language-go">fmt.Println(&quot;hi&quot;)</pre>` +

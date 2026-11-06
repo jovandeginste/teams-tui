@@ -828,11 +828,16 @@ func (w *Worker) hasArchivedAttachments(messageID int64, minCount int) bool {
 
 	var rows []InitAttachment
 
+	w.dbMu.Lock()
+
 	err := w.db.Raw(`
 		SELECT message_id, COALESCE(filename, '') AS filename, COALESCE(checksum, '') AS checksum, COALESCE(extension, '') AS extension
 		FROM message_attachments
 		WHERE message_id = ?
 	`, messageID).Scan(&rows).Error
+
+	w.dbMu.Unlock()
+
 	if err != nil || len(rows) < minCount {
 		return false
 	}

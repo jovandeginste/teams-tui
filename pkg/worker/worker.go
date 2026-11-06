@@ -110,6 +110,11 @@ type attachmentJob struct {
 	desc      AttachmentDescriptor
 }
 
+type recordAttachmentTasks struct {
+	messageID int64
+	tasks     []AttachmentDescriptor
+}
+
 type Worker struct {
 	db          *gorm.DB
 	dir         string
@@ -384,8 +389,12 @@ func (w *Worker) SendInitSnapshot(ctx context.Context) error {
 		return nil
 	}
 
+	w.dbMu.Lock()
+
 	authors := make([]InitAuthor, 0)
 	if err := w.db.WithContext(ctx).Raw("SELECT id, name FROM authors").Scan(&authors).Error; err != nil {
+		w.dbMu.Unlock()
+
 		return err
 	}
 
@@ -402,6 +411,8 @@ func (w *Worker) SendInitSnapshot(ctx context.Context) error {
 		FROM channels c
 	`).Scan(&channels).Error
 	if err != nil {
+		w.dbMu.Unlock()
+
 		return err
 	}
 
@@ -411,6 +422,9 @@ func (w *Worker) SendInitSnapshot(ctx context.Context) error {
 		SELECT message_id, COALESCE(filename, '') AS filename, COALESCE(checksum, '') AS checksum, COALESCE(extension, '') AS extension
 		FROM message_attachments
 	`).Scan(&attachments).Error
+
+	w.dbMu.Unlock()
+
 	if err != nil {
 		return err
 	}
@@ -424,14 +438,17 @@ func (w *Worker) SendInitSnapshot(ctx context.Context) error {
 }
 
 func (w *Worker) HandleFlush(ctx context.Context, msg RequestMessage) error {
-	var updates []GroupNameUpdate
+	var (
+		updates  []GroupNameUpdate
+		attTasks []recordAttachmentTasks
+	)
 
 	w.dbMu.Lock()
 
 	err := w.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var txErr error
 
-		updates, txErr = w.applyFlushTx(tx, msg)
+		updates, attTasks, txErr = w.applyFlushTx(tx, msg)
 
 		return txErr
 	})
@@ -445,6 +462,10 @@ func (w *Worker) HandleFlush(ctx context.Context, msg RequestMessage) error {
 		return err
 	}
 
+	for _, item := range attTasks {
+		w.queueAttachmentTasks(item.messageID, item.tasks)
+	}
+
 	if len(updates) > 0 && w.out != nil {
 		return w.writeJSON(GroupNamesResponse{
 			Type:    "group-names",
@@ -455,32 +476,44 @@ func (w *Worker) HandleFlush(ctx context.Context, msg RequestMessage) error {
 	return nil
 }
 
-func (w *Worker) applyFlushTx(tx *gorm.DB, msg RequestMessage) ([]GroupNameUpdate, error) {
+func (w *Worker) applyFlushTx(tx *gorm.DB, msg RequestMessage) ([]GroupNameUpdate, []recordAttachmentTasks, error) {
 	if err := w.flushAuthorsAndChannels(tx, msg.Authors, msg.Channels); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
+	var attTasks []recordAttachmentTasks
+
 	for _, rec := range msg.Records {
-		if err := w.flushRecord(tx, rec); err != nil {
-			return nil, err
+		tasks, err := w.flushRecord(tx, rec)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		if len(tasks) > 0 {
+			attTasks = append(attTasks, recordAttachmentTasks{messageID: rec.ID, tasks: tasks})
 		}
 	}
 
 	for _, att := range msg.Attachments {
 		if err := w.flushAttachment(tx, att); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	for _, ls := range msg.LastSyncs {
 		if ls.ChannelID != "" && ls.SyncTS > 0 {
 			if err := upsertLastSync(tx, ls.ChannelID, ls.SyncTS); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
 
-	return w.flushGroupNames(tx, msg.GroupNameRequests)
+	updates, err := w.flushGroupNames(tx, msg.GroupNameRequests)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return updates, attTasks, nil
 }
 
 func (w *Worker) flushAuthorsAndChannels(tx *gorm.DB, authors []AuthorPayload, channels []ChannelPayload) error {
@@ -507,43 +540,41 @@ func (w *Worker) flushAuthorsAndChannels(tx *gorm.DB, authors []AuthorPayload, c
 	return nil
 }
 
-func (w *Worker) flushRecord(tx *gorm.DB, rec RecordPayload) error {
+func (w *Worker) flushRecord(tx *gorm.DB, rec RecordPayload) ([]AttachmentDescriptor, error) {
 	tasks := w.prepareRecord(tx, &rec)
 
 	if rec.ChannelID != nil && *rec.ChannelID != "" {
 		if _, err := upsertChannel(tx, *rec.ChannelID, rec.ChannelName, rec.ChannelType, rec.TeamName); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	if rec.AuthorID != nil && *rec.AuthorID != "" {
 		if err := upsertAuthor(tx, *rec.AuthorID, rec.AuthorName); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	if err := upsertMessage(tx, rec); err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := replaceReactions(tx, rec.ID, rec.Reactions); err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := replaceMentions(tx, rec.ID, rec.Mentions); err != nil {
-		return err
+		return nil, err
 	}
 
 	for _, att := range rec.Attachments {
 		att.MessageID = rec.ID
 		if err := w.flushAttachment(tx, att); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	w.queueAttachmentTasks(rec.ID, tasks)
-
-	return nil
+	return tasks, nil
 }
 
 func (w *Worker) prepareRecord(tx *gorm.DB, rec *RecordPayload) []AttachmentDescriptor {
@@ -675,6 +706,9 @@ func (w *Worker) persistSavedAttachment(att AttachmentPayload) {
 	w.dbMu.Lock()
 
 	err := w.flushAttachment(w.db, att)
+	if err == nil {
+		_ = w.db.Exec("PRAGMA wal_checkpoint(PASSIVE)").Error
+	}
 
 	w.dbMu.Unlock()
 

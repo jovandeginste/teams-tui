@@ -178,6 +178,12 @@ if (process.type === "browser") {
       dbWorker = spawn(workerBin, [], {
         stdio: ["pipe", "pipe", "inherit"],
       });
+      if (dbWorker.stdin) {
+        dbWorker.stdin.on("error", () => {});
+      }
+      dbWorker.on("error", () => {
+        dbWorker = null;
+      });
       const rl = readline.createInterface({ input: dbWorker.stdout });
       rl.on("line", (line) => {
         if (!line.trim()) return;
